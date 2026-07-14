@@ -105,6 +105,15 @@ class FleetDriver(SQLModel, table=True):
     min_since_break: int = 0
     hos_violation_flags: str = ""  # comma-joined codes, empty = clean
 
+    def drive_min_remaining_calc(self) -> int:
+        return max(0, 11 * 60 - self.drive_min_used)
+
+    def window_min_remaining_calc(self) -> int:
+        return max(0, 14 * 60 - self.window_min_used)
+
+    def cycle_min_remaining_calc(self) -> int:
+        return max(0, 70 * 60 - self.cycle_min_used)
+
 
 class FleetTruck(SQLModel, table=True):
     __tablename__ = "fleet_trucks"

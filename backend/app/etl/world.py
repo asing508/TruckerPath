@@ -13,7 +13,7 @@ import random
 import sqlite3
 from datetime import datetime, timedelta
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from ..config import (
     FLEET_TERMINALS,
@@ -76,6 +76,12 @@ class WorldBuilder:
         key = f"{o[0]},{o[1]}->{d[0]},{d[1]}"
         if key in self.geometry_ids:
             return self.session.get(RouteGeometry, self.geometry_ids[key])
+        cached = self.session.exec(
+            select(RouteGeometry).where(RouteGeometry.lane_key == key)
+        ).first()
+        if cached:
+            self.geometry_ids[key] = cached.id
+            return cached
         (olat, olon), (dlat, dlon) = self.coords[o], self.coords[d]
         pts, miles, hours, source = fetch_road_polyline(olat, olon, dlat, dlon)
         geom = RouteGeometry(
