@@ -109,30 +109,46 @@ def _tick_linehaul(
     sim_now: datetime,
     dt_hours: float,
 ) -> None:
-    # 30-minute break handling: pause the wheels, keep the ledger honest
-    if driver.duty == DriverDuty.OFF:
-        open_off = session.exec(
-            select(HosEvent).where(HosEvent.driver_id == driver.driver_id, HosEvent.end == None)  # noqa: E711
-        ).first()
-        if open_off and (sim_now - open_off.start) >= timedelta(minutes=HOS_BREAK_MIN + 2):
+    # HOS behavior: the ELD would force these stops, so the sim takes them
+    if trip.rest_until:
+        if sim_now >= trip.rest_until:
+            kind = trip.rest_kind
+            trip.rest_until = None
+            trip.rest_kind = ""
             set_duty(session, driver, DriverDuty.DRIVING, sim_now)
             broadcaster.publish("feed", {
                 "kind": "break_end", "ts": sim_now,
-                "text": f"{driver.name} back on the road after 30-min break",
+                "text": (f"{driver.name} back on the road after "
+                         f"{'10-h reset' if kind == 'reset' else '30-min break'}"),
                 "trip_id": trip.trip_id,
             })
         else:
             truck.speed_mph = 0.0
             return
-    elif driver.min_since_break >= HOS_BREAK_AFTER_DRIVE_MIN - 12:
-        set_duty(session, driver, DriverDuty.OFF, sim_now)
-        truck.speed_mph = 0.0
-        broadcaster.publish("feed", {
-            "kind": "break_start", "ts": sim_now,
-            "text": f"{driver.name} pulled in for the required 30-min break",
-            "trip_id": trip.trip_id,
-        })
-        return
+    else:
+        worst = min(driver.drive_min_remaining_calc(), driver.window_min_remaining_calc())
+        if worst <= 8:
+            trip.rest_until = sim_now + timedelta(minutes=10 * 60 + 10)
+            trip.rest_kind = "reset"
+            set_duty(session, driver, DriverDuty.OFF, sim_now)
+            truck.speed_mph = 0.0
+            broadcaster.publish("feed", {
+                "kind": "break_start", "ts": sim_now,
+                "text": f"{driver.name} out of hours - parked for mandatory 10-h reset",
+                "trip_id": trip.trip_id,
+            })
+            return
+        if driver.min_since_break >= HOS_BREAK_AFTER_DRIVE_MIN - 12:
+            trip.rest_until = sim_now + timedelta(minutes=HOS_BREAK_MIN + 5)
+            trip.rest_kind = "break"
+            set_duty(session, driver, DriverDuty.OFF, sim_now)
+            truck.speed_mph = 0.0
+            broadcaster.publish("feed", {
+                "kind": "break_start", "ts": sim_now,
+                "text": f"{driver.name} pulled in for the required 30-min break",
+                "trip_id": trip.trip_id,
+            })
+            return
 
     fault = _fault(trip)
     frac = trip.progress_miles / max(trip.total_miles, 0.1)

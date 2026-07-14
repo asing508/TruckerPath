@@ -128,3 +128,88 @@
     @apply font-sans;
   }
 }
+/* ============================================================
+   Trucker Path visual language
+   ============================================================ */
+
+:root {
+  /* brand */
+  --tp-navy: #10151d;
+  --tp-navy-800: #161d28;
+  --tp-navy-700: #1e2836;
+  --tp-blue: #2489e9;
+  --tp-blue-strong: #146fd1;
+  --tp-banner: #1e8ff2;
+  --tp-bg: #f3f5f7;
+  --tp-surface: #ffffff;
+  --tp-line: #e2e8ee;
+  --tp-text: #16202b;
+  --tp-muted: #5b6b7b;
+  /* status */
+  --tp-ok: #15803d;
+  --tp-watch: #a16207;
+  --tp-risk: #d97706;
+  --tp-crit: #dc2626;
+
+  /* re-skin shadcn primitives */
+  --background: #f3f5f7;
+  --foreground: #16202b;
+  --primary: #2489e9;
+  --primary-foreground: #ffffff;
+  --ring: #2489e9;
+  --border: #e2e8ee;
+  --radius: 0.5rem;
+  --muted-foreground: #5b6b7b;
+}
+
+@theme inline {
+  --color-tp-navy: var(--tp-navy);
+  --color-tp-navy-800: var(--tp-navy-800);
+  --color-tp-navy-700: var(--tp-navy-700);
+  --color-tp-blue: var(--tp-blue);
+  --color-tp-blue-strong: var(--tp-blue-strong);
+  --color-tp-banner: var(--tp-banner);
+  --color-tp-bg: var(--tp-bg);
+  --color-tp-line: var(--tp-line);
+  --color-tp-text: var(--tp-text);
+  --color-tp-muted: var(--tp-muted);
+  --color-tp-ok: var(--tp-ok);
+  --color-tp-watch: var(--tp-watch);
+  --color-tp-risk: var(--tp-risk);
+  --color-tp-crit: var(--tp-crit);
+  --font-heading: var(--font-poppins);
+  --font-sans: var(--font-plex);
+  --font-mono: var(--font-jetbrains);
+}
+
+/* data-dense tables */
+.tp-table th {
+  font-family: var(--font-plex);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--tp-muted);
+  font-weight: 600;
+}
+.tp-num {
+  font-family: var(--font-jetbrains);
+  font-variant-numeric: tabular-nums;
+}
+
+/* map marker pulse for active exceptions */
+@keyframes tp-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); }
+  70% { box-shadow: 0 0 0 12px rgba(220, 38, 38, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+}
+.tp-marker { transition: transform 0.9s linear; }
+.tp-marker .pulse { animation: tp-pulse 1.6s infinite; }
+
+/* maplibre chrome */
+.maplibregl-ctrl-attrib { font-size: 9px !important; opacity: 0.75; }
+.maplibregl-popup-content {
+  font-family: var(--font-plex);
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}

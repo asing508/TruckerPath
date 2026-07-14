@@ -23,6 +23,7 @@ from ..config import (
     HOS_WARN_DRIVE_REMAINING_MIN,
 )
 from ..hos.ledger import compute_clocks
+from ..hos.schedule import legal_elapsed_minutes
 from ..models import (
     DriverDuty,
     EtaState,
@@ -216,7 +217,26 @@ _ETA_BANDS = [
 def _detect_eta(session, trip, load, now) -> FleetException | None:
     remaining = trip.total_miles - trip.progress_miles
     speed = max(trip.speed_ewma_mph or 45.0, 25.0)
-    projected = now + timedelta(hours=remaining / speed)
+    drive_min_needed = int(remaining / speed * 60)
+    driver = session.get(FleetDriver, trip.driver_id)
+    # projection includes the rest the driver is legally forced to take
+    if trip.rest_until and trip.rest_until > now:
+        rest_left = (trip.rest_until - now).total_seconds() / 60
+        fresh = trip.rest_kind == "reset"
+        elapsed = legal_elapsed_minutes(
+            drive_min_needed,
+            drive_used_min=0 if fresh else driver.drive_min_used,
+            window_used_min=0 if fresh else driver.window_min_used,
+            since_break_min=0,
+        )
+        projected = now + timedelta(minutes=rest_left + elapsed)
+    else:
+        projected = now + timedelta(minutes=legal_elapsed_minutes(
+            drive_min_needed,
+            drive_used_min=driver.drive_min_used,
+            window_used_min=driver.window_min_used,
+            since_break_min=driver.min_since_break,
+        ))
     trip.projected_eta = projected
     slip_min = (projected - trip.planned_eta).total_seconds() / 60.0
 
@@ -282,28 +302,28 @@ def _detect_hos(session, trip, driver, load, now) -> FleetException | None:
     if driver.duty not in (DriverDuty.DRIVING, DriverDuty.ON_DUTY):
         return None
     worst = min(driver.drive_min_remaining_calc(), driver.window_min_remaining_calc())
-    remaining_miles = trip.total_miles - trip.progress_miles
-    drive_needed_min = remaining_miles / max(trip.speed_ewma_mph or 45.0, 25.0) * 60.0
+    cycle_left = driver.cycle_min_remaining_calc()
 
-    cannot_finish = (
-        trip.status == TripStatus.IN_TRANSIT and drive_needed_min > worst and worst < 240
-    )
-    if worst >= HOS_WARN_DRIVE_REMAINING_MIN and not cannot_finish:
+    if worst >= HOS_WARN_DRIVE_REMAINING_MIN and cycle_left >= 240:
         existing = _find_active(session, ExceptionType.HOS_RISK, trip_id=trip.trip_id)
         if existing and worst > 90:
             _resolve(session, existing, now, f"{driver.name} HOS clocks recovered")
         return None
-    severity = "CRITICAL" if (worst < 20 or cannot_finish) else "HIGH"
+    if worst < HOS_WARN_DRIVE_REMAINING_MIN:
+        severity = "CRITICAL" if worst < 20 else "HIGH"
+        title = (f"{driver.name} hits a mandatory stop in {int(worst)} min - "
+                 f"plan the rest stop or a relay")
+    else:
+        severity = "HIGH"
+        title = (f"{driver.name} has {cycle_left / 60:.1f} h left in the 70h/8d "
+                 f"cycle - tomorrow's assignments at risk")
     return _open(
-        session, now, ExceptionType.HOS_RISK, severity,
-        (f"{driver.name} has {int(worst)} min of legal drive time left"
-         + (" - cannot finish leg" if cannot_finish else "")),
+        session, now, ExceptionType.HOS_RISK, severity, title,
         {
             "drive_min_remaining": driver.drive_min_remaining_calc(),
             "window_min_remaining": driver.window_min_remaining_calc(),
-            "cycle_min_used": driver.cycle_min_used,
-            "drive_needed_min": int(drive_needed_min),
-            "cannot_finish_leg": cannot_finish,
+            "cycle_min_remaining": cycle_left,
+            "violations": driver.hos_violation_flags or "none",
         },
         trip=trip,
     )

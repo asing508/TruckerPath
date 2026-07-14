@@ -25,6 +25,8 @@ from ..config import (
 )
 from ..db import engine
 from ..geo import Polyline
+from ..hos.ledger import compute_clocks
+from ..hos.schedule import legal_elapsed_minutes, schedule_events
 from ..models import (
     DocPacket,
     DriverDuty,
@@ -226,7 +228,8 @@ class WorldBuilder:
         progress_frac: float,
         status: TripStatus,
         fault: dict | None = None,
-    ) -> LiveTrip:
+    ) -> tuple[LiveTrip, list[HosEvent]]:
+        """Returns the trip plus the FMCSA-legal duty history that produced it."""
         self._trip_seq += 1
         o = (load.origin_city, load.origin_state)
         d = (load.dest_city, load.dest_state)
@@ -234,10 +237,19 @@ class WorldBuilder:
         line = Polyline.from_points(json.loads(geom.encoded_polyline))
         total = line.total_miles
         progress = total * progress_frac
-        drive_hours_done = progress / LINEHAUL_BASE_MPH
-        started_at = self.t0 - timedelta(hours=drive_hours_done + 0.4)
-        planned_eta = started_at + timedelta(hours=total / PLANNING_MPH + DOCK_BUFFER_HOURS)
-        # keep the load's quoted windows consistent with when the truck rolled
+        drive_min_done = int(progress / LINEHAUL_BASE_MPH * 60)
+
+        duty_events = [
+            HosEvent(driver_id=driver.driver_id, duty=duty, start=s, end=e)
+            for duty, s, e in schedule_events(drive_min_done, self.t0)
+        ] if status != TripStatus.AT_PICKUP else []
+        started_at = (duty_events[0].start if duty_events
+                      else self.t0 - timedelta(minutes=100 + 25))
+
+        plan_drive_min = int(total / PLANNING_MPH * 60)
+        planned_eta = started_at + timedelta(
+            minutes=25 + legal_elapsed_minutes(plan_drive_min)
+        ) + timedelta(hours=DOCK_BUFFER_HOURS)
         load.pickup_window_start = started_at - timedelta(hours=1)
         load.pickup_window_end = started_at + timedelta(hours=1)
         load.delivery_deadline = planned_eta + timedelta(hours=2)
@@ -258,6 +270,14 @@ class WorldBuilder:
             last_ping_at=self.t0,
             fault_script=json.dumps(fault or {}),
         )
+
+        # the walker always leaves an open DRIVING block at t0
+        driver.duty = (
+            DriverDuty.DRIVING
+            if status in (TripStatus.IN_TRANSIT, TripStatus.EN_ROUTE_PICKUP)
+            else DriverDuty.ON_DUTY
+        )
+
         lat, lon, heading = line.point_at(progress)
         truck.lat, truck.lon, truck.heading_deg = lat, lon, heading
         truck.speed_mph = LINEHAUL_BASE_MPH if status == TripStatus.IN_TRANSIT else 0.0
@@ -266,33 +286,41 @@ class WorldBuilder:
         driver.lat, driver.lon = lat, lon
         driver.truck_id = truck.truck_id
         driver.trip_id = trip.trip_id
-        driver.duty = DriverDuty.DRIVING if status in (
-            TripStatus.IN_TRANSIT, TripStatus.EN_ROUTE_PICKUP
-        ) else DriverDuty.ON_DUTY
         if status == TripStatus.AT_PICKUP:
             trip.dwell_facility_id = load.pickup_facility_id
             trip.dwell_started_at = self.t0 - timedelta(minutes=100)
-            truck.speed_mph = 0.0
+            duty_events = [HosEvent(
+                driver_id=driver.driver_id, duty=DriverDuty.ON_DUTY,
+                start=trip.dwell_started_at, end=None)]
         load.status = LoadStatus.IN_TRANSIT if status == TripStatus.IN_TRANSIT else LoadStatus.ASSIGNED
-        return trip
+        return trip, duty_events
 
     # ---- HOS history ----------------------------------------------------------
-    def seed_hos(self, drivers: list[FleetDriver], squeeze_driver_id: str) -> list[HosEvent]:
-        """Eight days of plausible duty history per driver; one driver seeded
-        deep into his cycle so dispatch/safety must reckon with it."""
+    def seed_hos(
+        self, drivers: list[FleetDriver], busy_since: dict[str, datetime]
+    ) -> list[HosEvent]:
+        """Plausible prior-days duty history per driver.
+
+        Days are only generated when the full day block ends >= 10h before the
+        driver's current trip history begins, so the ledger never sees
+        overlapping duty and every driver is violation-free at t0.
+        """
         events: list[HosEvent] = []
         day0 = self.t0 - timedelta(days=8)
         for i, drv in enumerate(drivers):
             rng = random.Random(SEED * 1000 + i)
-            heavy = drv.driver_id == squeeze_driver_id
+            cutoff = busy_since.get(drv.driver_id, self.t0)
             for day in range(8):
                 base = day0 + timedelta(days=day)
-                if not heavy and rng.random() < 0.25:
+                if rng.random() < 0.25:
                     continue  # day off
-                start_hour = rng.uniform(5.5, 8.0)
-                drive_h = rng.uniform(8.6, 10.6) if heavy else rng.uniform(5.0, 9.5)
+                start_hour = rng.uniform(5.5, 7.5)
+                drive_h = rng.uniform(5.0, 8.5)
                 duty_start = base + timedelta(hours=start_hour)
                 pre = rng.uniform(0.4, 0.8)
+                day_end = duty_start + timedelta(hours=pre + drive_h + 0.6)
+                if day_end + timedelta(hours=10) >= cutoff:
+                    continue
                 events.append(HosEvent(
                     driver_id=drv.driver_id, duty=DriverDuty.ON_DUTY,
                     start=duty_start, end=duty_start + timedelta(hours=pre)))
@@ -309,17 +337,35 @@ class WorldBuilder:
                 events.append(HosEvent(
                     driver_id=drv.driver_id, duty=DriverDuty.DRIVING,
                     start=s2, end=s2 + timedelta(hours=drive_h - d1)))
-        # Openers for drivers currently on the road are appended by build_world
         return events
 
-    def open_driving_event(self, trip: LiveTrip) -> list[HosEvent]:
-        pre = HosEvent(
-            driver_id=trip.driver_id, duty=DriverDuty.ON_DUTY,
-            start=trip.started_at - timedelta(minutes=25), end=trip.started_at)
-        driving = HosEvent(
-            driver_id=trip.driver_id, duty=DriverDuty.DRIVING,
-            start=trip.started_at, end=None)
-        return [pre, driving]
+    def top_up_cycle(
+        self,
+        driver_id: str,
+        events: list[HosEvent],
+        busy_since: datetime,
+        target_cycle_min: int,
+    ) -> list[HosEvent]:
+        """Adds early-morning ON_DUTY yard blocks on free prior days until the
+        driver's 70h/8d recap reaches the target — the dispatch squeeze story,
+        built without ever violating."""
+        mine = [e for e in events if e.driver_id == driver_id]
+        extra: list[HosEvent] = []
+        for day in range(1, 8):
+            clocks = compute_clocks(mine + extra, self.t0)
+            deficit = target_cycle_min - clocks.cycle_min_used
+            if deficit <= 0:
+                break
+            base = self.t0 - timedelta(days=day)
+            start = base.replace(hour=1, minute=30)
+            end = start + timedelta(minutes=min(deficit, 5 * 60))
+            if end + timedelta(hours=10) >= busy_since:
+                continue
+            if any(e.start <= end and (e.end or self.t0) >= start for e in mine + extra):
+                continue
+            extra.append(HosEvent(
+                driver_id=driver_id, duty=DriverDuty.ON_DUTY, start=start, end=end))
+        return extra
 
 
 def build_world(conn: sqlite3.Connection, t0: datetime) -> dict:
@@ -361,6 +407,7 @@ def build_world(conn: sqlite3.Connection, t0: datetime) -> dict:
 
         loads: list[LiveLoad] = []
         trips: list[LiveTrip] = []
+        trip_events: list[HosEvent] = []
 
         # 8 linehaul trips in motion at T0, staggered along their routes
         progress_fracs = [0.42, 0.44, 0.48, 0.55, 0.30, 0.66, 0.18, 0.74]
@@ -369,18 +416,21 @@ def build_world(conn: sqlite3.Connection, t0: datetime) -> dict:
             truck, driver = pairs[i]
             route = route_cycle[i * 2 + 1]
             load = wb.make_load(route, wb.t0 - timedelta(hours=6), LoadStatus.ASSIGNED)
-            trip = wb.make_trip(load, driver, truck, frac, TripStatus.IN_TRANSIT, faults[i])
+            trip, events = wb.make_trip(load, driver, truck, frac,
+                                        TripStatus.IN_TRANSIT, faults[i])
             loads.append(load)
             trips.append(trip)
+            trip_events.extend(events)
 
         # 1 truck dwelling at a pickup dock (detention builds up)
         truck, driver = pairs[8]
         home_routes = by_origin.get(truck.home_terminal) or outbound
         load = wb.make_load(rng.choice(home_routes), wb.t0 - timedelta(hours=2), LoadStatus.ASSIGNED)
-        trip = wb.make_trip(load, driver, truck, 0.0, TripStatus.AT_PICKUP,
-                            {"type": "dwell", "extra_min": 200})
+        trip, events = wb.make_trip(load, driver, truck, 0.0, TripStatus.AT_PICKUP,
+                                    {"type": "dwell", "extra_min": 200})
         loads.append(load)
         trips.append(trip)
+        trip_events.extend(events)
 
         # 6 unassigned loads for the dispatch board
         unassigned_routes = rng.sample(outbound, min(6, len(outbound)))
@@ -391,12 +441,18 @@ def build_world(conn: sqlite3.Connection, t0: datetime) -> dict:
                 LoadStatus.UNASSIGNED,
             ))
 
-        # HOS: the driver of trip #4 is deep into his cycle (relay tension)
-        squeeze_driver = trips[3].driver_id
-        hos_events = wb.seed_hos(drivers, squeeze_driver)
-        for trip in trips:
-            if trip.status in (TripStatus.IN_TRANSIT, TripStatus.EN_ROUTE_PICKUP):
-                hos_events.extend(wb.open_driving_event(trip))
+        # prior-days history that never overlaps live trip duty
+        busy_since = {}
+        for ev in trip_events:
+            cur = busy_since.get(ev.driver_id)
+            busy_since[ev.driver_id] = min(cur, ev.start) if cur else ev.start
+        hos_events = wb.seed_hos(drivers, busy_since) + trip_events
+
+        # the driver of the longest in-flight trip runs a nearly spent 70h cycle
+        squeeze_driver = trips[2].driver_id
+        hos_events += wb.top_up_cycle(
+            squeeze_driver, hos_events,
+            busy_since.get(squeeze_driver, wb.t0), target_cycle_min=66 * 60)
 
         # Compliance faults: one truck overdue for PM, one inspection expiring
         idle_trucks = [t for t in active_trucks if t.trip_id is None]

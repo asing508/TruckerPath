@@ -11,6 +11,7 @@ from ..config import INVOICE_DIR
 from ..db import engine
 from ..etl.osrm import fetch_road_polyline
 from ..geo import haversine_miles
+from ..hos.schedule import legal_elapsed_minutes
 from ..models import (
     ActionStatus,
     DocPacket,
@@ -140,7 +141,14 @@ def _assign_driver(s: Session, action: PendingAction, draft: dict, now: datetime
     pickup_lat, pickup_lon = coords[o]
     deadhead_mi = haversine_miles(driver.lat, driver.lon, pickup_lat, pickup_lon) * ROAD_FACTOR
     arrive = now + timedelta(hours=deadhead_mi / DEADHEAD_MPH + 0.2)
-    planned_eta = arrive + timedelta(hours=0.75 + geom.distance_miles / PLANNING_MPH)
+    # quote the ETA with the driver's current clocks: breaks/resets included
+    linehaul_min = legal_elapsed_minutes(
+        int(geom.distance_miles / PLANNING_MPH * 60),
+        drive_used_min=driver.drive_min_used,
+        window_used_min=driver.window_min_used,
+        since_break_min=driver.min_since_break,
+    )
+    planned_eta = arrive + timedelta(minutes=45 + linehaul_min)
 
     trip = LiveTrip(
         trip_id=f"T-{now:%y%m}-{900 + action.id:03d}",
