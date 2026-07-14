@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, ShieldAlert, Wrench } from "lucide-react";
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { toast } from "sonner";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { api } from "@/lib/api";
@@ -63,12 +64,14 @@ function HosBar({ used, total }: { used: number; total: number }) {
 function BriefPanel({ driver }: { driver: RiskRow }) {
   const [requestedAt, setRequestedAt] = useState(0);
   const [runId, setRunId] = useState<number | null>(null);
+  const [requesting, setRequesting] = useState(false);
   const runs = useLive((s) => s.runs);
   const steps = useLive((s) => (runId ? s.steps[runId] ?? [] : []));
 
   useEffect(() => {
     setRunId(null);
     setRequestedAt(0);
+    setRequesting(false);
   }, [driver.driver_id]);
 
   useEffect(() => {
@@ -87,7 +90,21 @@ function BriefPanel({ driver }: { driver: RiskRow }) {
   const output = steps.find((s) => s.kind === "output")?.payload as
     | { risk_level: string; brief_markdown: string; talking_points: string[] }
     | undefined;
-  const running = runId !== null && runs[runId]?.status === "RUNNING";
+  const running = requesting || (runId !== null && runs[runId]?.status === "RUNNING");
+
+  async function generate() {
+    setRequesting(true);
+    setRequestedAt(Date.now());
+    setRunId(null);
+    try {
+      const res = await api.post<{ error?: string }>(`/api/safety/brief/${driver.driver_id}`);
+      if (res.error) toast.error(res.error);
+    } catch {
+      toast.error("Could not reach the safety agent - try again.");
+    } finally {
+      setRequesting(false);
+    }
+  }
 
   return (
     <div className="rounded-lg border border-tp-line bg-white">
@@ -97,11 +114,7 @@ function BriefPanel({ driver }: { driver: RiskRow }) {
         </h3>
         <button
           disabled={running}
-          onClick={() => {
-            setRequestedAt(Date.now());
-            setRunId(null);
-            void api.post(`/api/safety/brief/${driver.driver_id}`);
-          }}
+          onClick={generate}
           className="ml-auto flex items-center gap-1.5 rounded-md bg-tp-blue px-2.5 py-1.5 text-[11.5px] font-semibold text-white hover:bg-tp-blue-strong disabled:opacity-50"
         >
           <Bot className="h-3.5 w-3.5" />

@@ -24,6 +24,7 @@ from ..models import (
     MessageLog,
     PendingAction,
     PingLog,
+    RunStatus,
     SimState,
 )
 from ..sim.engine import sim_engine
@@ -77,6 +78,14 @@ def reset() -> dict:
     sim_engine._resetting = True
     try:
         with Session(engine) as s:
+            # Tell any browser tab holding SSE-cached "RUNNING" agent state to
+            # drop it now - the rows are about to disappear, and an in-flight
+            # coroutine writing to them afterward degrades gracefully (see
+            # finish_run's None-guard) but won't reach the client anymore.
+            from sqlmodel import select
+            for run in s.exec(select(AgentRun).where(AgentRun.status == RunStatus.RUNNING)):
+                broadcaster.publish("agent_run", {"id": run.id, "status": "FAILED",
+                                                  "summary": "cancelled by demo reset"})
             for table in (PingLog, HosEvent, LiveTrip, LiveLoad, FleetDriver,
                           FleetTruck, FleetException, PendingAction, AgentStep,
                           AgentRun, MessageLog, DocPacket, Invoice, SimState):

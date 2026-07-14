@@ -108,6 +108,11 @@ def start_run(kind: str, subject_id: str) -> tuple[int, Tracer]:
 def finish_run(run_id: int, summary: str, error: str = "") -> None:
     with Session(db_engine) as s:
         run = s.get(AgentRun, run_id)
+        if run is None:
+            # the run row is gone - a demo reset wiped it out from under this
+            # in-flight coroutine. Nothing to finish; just stop quietly.
+            log.warning("finish_run: run %s no longer exists (likely a reset)", run_id)
+            return
         run.status = RunStatus.FAILED if error else RunStatus.DONE
         run.summary = summary[:2000]
         run.error = error[:2000]

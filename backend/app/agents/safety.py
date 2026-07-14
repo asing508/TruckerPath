@@ -14,7 +14,7 @@ from sqlmodel import Session, select
 
 from ..config import HOS_CYCLE_LIMIT_MIN
 from ..db import engine, raw_connection
-from ..models import DriverDuty, FleetDriver, FleetTruck, HosEvent, SimState
+from ..models import AgentRun, DriverDuty, FleetDriver, FleetTruck, HosEvent, RunStatus, SimState
 from .gemini import run_agent, tool
 from .schemas import SafetyBrief
 
@@ -138,6 +138,19 @@ use in a 5-minute check-in. Plain language, no corporate speak, no emojis."""
 
 
 async def coaching_brief(driver_id: str) -> dict:
+    # Synchronous guard (no `await` before it) against a double-click firing
+    # two concurrent briefs for the same driver - see dispatch.py for why
+    # this check-then-proceed is atomic under asyncio's cooperative scheduling.
+    with Session(engine) as s:
+        already_running = s.exec(select(AgentRun).where(
+            AgentRun.kind == "safety",
+            AgentRun.subject_id == driver_id,
+            AgentRun.status == RunStatus.RUNNING,
+        )).first()
+        if already_running:
+            return {"error": "already writing a brief for this driver",
+                    "run_id": already_running.id}
+
     result, run_id = await run_agent(
         kind="safety",
         subject_id=driver_id,

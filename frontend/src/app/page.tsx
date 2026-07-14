@@ -2,6 +2,7 @@
 
 import { Sparkles } from "lucide-react";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { FleetMap } from "@/components/map/FleetMap";
@@ -141,8 +142,13 @@ function ExceptionRail() {
               </p>
               <p className="text-[12px] leading-snug">{e.title}</p>
               <button
-                className="mt-1.5 rounded border border-tp-line bg-white px-2 py-1 text-[11px] font-medium hover:border-tp-blue hover:text-tp-blue"
-                onClick={() => void api.post(`/api/exceptions/${e.id}/triage`)}
+                disabled={e.state === "TRIAGING"}
+                className="mt-1.5 rounded border border-tp-line bg-white px-2 py-1 text-[11px] font-medium hover:border-tp-blue hover:text-tp-blue disabled:opacity-50"
+                onClick={() =>
+                  api.post(`/api/exceptions/${e.id}/triage`).catch(() =>
+                    toast.error("Could not reach the triage agent - try again."),
+                  )
+                }
               >
                 {e.state === "TRIAGING" ? "Agent investigating…" : "Send agent to investigate"}
               </button>

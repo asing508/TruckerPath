@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 
 from fpdf import FPDF
@@ -34,6 +35,8 @@ from ..models import (
 from ..sim.mover import set_duty
 from ..streams import broadcaster
 
+log = logging.getLogger("executor")
+
 ROAD_FACTOR = 1.18
 DEADHEAD_MPH = 45.0
 PLANNING_MPH = 52.0
@@ -56,7 +59,15 @@ def approve_action(action_id: int, draft_override: dict | None = None) -> dict:
             action.draft = json.dumps(draft)
 
         now = _sim_now(s)
-        note = _execute(s, action, draft, now)
+        try:
+            note = _execute(s, action, draft, now)
+        except Exception as e:
+            # Leave the action PENDING so the dispatcher can edit and retry -
+            # a malformed draft or a transient OSRM/network hiccup should
+            # never silently eat an approval or 500 the whole request.
+            log.exception("action %s failed to execute", action_id)
+            s.rollback()
+            return {"error": f"execution failed: {e}"}
 
         action.status = ActionStatus.APPROVED
         action.decided_at = datetime.now()
@@ -111,8 +122,11 @@ def _geometry_for(s: Session, o: tuple[str, str], d: tuple[str, str],
 def _assign_driver(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
     from ..db import raw_connection
 
+    driver_id = draft.get("driver_id")
+    if not driver_id:
+        return "no driver selected in the draft"
     load = s.get(LiveLoad, action.subject_id)
-    driver = s.get(FleetDriver, draft["driver_id"])
+    driver = s.get(FleetDriver, driver_id)
     if load is None or driver is None:
         return "load or driver missing"
     if load.status != LoadStatus.UNASSIGNED:
@@ -136,6 +150,8 @@ def _assign_driver(s: Session, action: PendingAction, draft: dict, now: datetime
 
     o = (load.origin_city, load.origin_state)
     d = (load.dest_city, load.dest_state)
+    if o not in coords or d not in coords:
+        return f"no coordinates on file for {load.origin_city} or {load.dest_city}"
     geom = _geometry_for(s, o, d, coords)
 
     pickup_lat, pickup_lon = coords[o]
@@ -208,6 +224,8 @@ def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str
             broadcaster.publish("message", {"channel": "SMS", "to_name": driver.name,
                                             "body": draft["sms_body"], "ts": now})
             notes.append(f"SMS to {driver.name}")
+        else:
+            notes.append("trip/driver no longer active - SMS not sent")
     if draft.get("email_body"):
         trip = s.get(LiveTrip, action.subject_id)
         load = s.get(LiveLoad, trip.load_id) if trip else None
@@ -234,8 +252,14 @@ def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str
 
 def _send_invoice(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
     packet = s.get(DocPacket, int(action.subject_id))
+    if packet is None:
+        return "packet no longer exists"
     load = s.get(LiveLoad, packet.load_id)
-    lines = draft["invoice_lines"]
+    if load is None:
+        return "load no longer exists"
+    lines = draft.get("invoice_lines") or []
+    if not lines:
+        return "no invoice lines in the draft"
     total = round(sum(l["amount"] for l in lines), 2)
     inv_no = f"INV-{now:%y%m}-{packet.id:03d}"
     pdf_path = INVOICE_DIR / f"{inv_no}.pdf"

@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { DriverPhone } from "@/components/ops/DriverPhone";
 import { TraceDrawer } from "@/components/trace/TraceDrawer";
+import { Toaster } from "@/components/ui/sonner";
 
 import { NavRail } from "./NavRail";
 import { SimStrip } from "./SimStrip";
@@ -33,6 +34,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
       {traceOpen && <TraceDrawer onClose={() => setTraceOpen(false)} />}
       <DriverPhone open={phoneOpen} onClose={() => setPhoneOpen(false)} />
+      <Toaster position="bottom-right" richColors />
     </div>
   );
 }

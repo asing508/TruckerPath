@@ -2,6 +2,7 @@
 
 import { Gauge, Pause, Play, RotateCcw } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import { useLive } from "@/lib/hooks";
@@ -68,7 +69,8 @@ export function SimStrip() {
             try {
               await api.post("/api/sim/reset");
               window.location.reload();
-            } finally {
+            } catch {
+              toast.error("Reset failed - is the backend still running?");
               setResetting(false);
             }
           }}

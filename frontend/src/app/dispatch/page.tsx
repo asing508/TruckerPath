@@ -3,6 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bot, CircleAlert } from "lucide-react";
 import { useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { ActionCard } from "@/components/ops/ActionQueue";
@@ -100,15 +101,20 @@ function CandidateTable({ loadId }: { loadId: string }) {
 
 export default function DispatchPage() {
   const [selected, setSelected] = useState<string | null>(null);
-  const [asked, setAsked] = useState<Set<string>>(new Set());
+  const [requestingLoad, setRequestingLoad] = useState<string | null>(null);
   const { data: board } = useQuery({
     queryKey: ["dispatch"],
     queryFn: () => api.get<Board>("/api/dispatch/board"),
     refetchInterval: 20000,
   });
   const { data: actions } = useActions();
-  const agentBusy = useLive((s) =>
-    Object.values(s.runs).some((r) => r.kind === "dispatch" && r.status === "RUNNING"),
+  // Scoped to the selected load only - a run in flight for one load must not
+  // disable the button for a different one.
+  const runningForSelected = useLive((s) =>
+    selected !== null &&
+    Object.values(s.runs).some(
+      (r) => r.kind === "dispatch" && r.subject_id === selected && r.status === "RUNNING",
+    ),
   );
 
   const pendingForLoad = useMemo(
@@ -122,6 +128,18 @@ export default function DispatchPage() {
   );
 
   const loads = board?.unassigned_loads ?? [];
+
+  async function askAgent(loadId: string) {
+    setRequestingLoad(loadId);
+    try {
+      const res = await api.post<{ error?: string }>(`/api/dispatch/recommend/${loadId}`);
+      if (res.error) toast.error(res.error);
+    } catch {
+      toast.error("Could not reach the dispatch agent - try again.");
+    } finally {
+      setRequestingLoad(null);
+    }
+  }
 
   return (
     <AppShell>
@@ -183,18 +201,19 @@ export default function DispatchPage() {
                     Fleet comparison · {selected}
                   </h2>
                   <button
-                    disabled={agentBusy || asked.has(selected)}
-                    onClick={() => {
-                      setAsked(new Set(asked).add(selected));
-                      void api.post(`/api/dispatch/recommend/${selected}`);
-                    }}
+                    disabled={
+                      requestingLoad === selected ||
+                      runningForSelected ||
+                      pendingForLoad.has(selected)
+                    }
+                    onClick={() => askAgent(selected)}
                     className="ml-auto flex items-center gap-1.5 rounded-md bg-tp-blue px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-tp-blue-strong disabled:opacity-50"
                   >
                     <Bot className="h-3.5 w-3.5" />
-                    {agentBusy
+                    {requestingLoad === selected || runningForSelected
                       ? "Agent working…"
-                      : asked.has(selected)
-                        ? "Recommendation requested"
+                      : pendingForLoad.has(selected)
+                        ? "Recommendation pending"
                         : "Ask agent to recommend"}
                   </button>
                 </header>

@@ -15,8 +15,8 @@ frontend/.next/
 frontend/out/
 frontend/next-env.d.ts
 
-# generated at seed time
-backend/data/*.db
+# generated at seed time (includes SQLite WAL/SHM siblings)
+backend/data/*.db*
 backend/data/docs/
 backend/data/invoices/
 

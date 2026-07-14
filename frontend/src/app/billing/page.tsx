@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, ExternalLink, FileText } from "lucide-react";
 import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { toast } from "sonner";
 
 import { ActionCard } from "@/components/ops/ActionQueue";
 import { AppShell } from "@/components/shell/AppShell";
@@ -68,11 +69,25 @@ function PacketDetailPane({ packetId }: { packetId: number }) {
     refetchInterval: 6000,
   });
   const { data: actions } = useActions();
-  const auditing = useLive((s) =>
+  const [triggering, setTriggering] = useState(false);
+  const agentRunning = useLive((s) =>
     Object.values(s.runs).some(
       (r) => r.kind === "billing" && r.status === "RUNNING" && r.subject_id === packet?.load_id,
     ),
   );
+  const auditing = triggering || packet?.status === "AUDITING" || agentRunning;
+
+  async function runAudit() {
+    setTriggering(true);
+    try {
+      const res = await api.post<{ error?: string }>(`/api/billing/packets/${packetId}/audit`);
+      if (res.error) toast.error(res.error);
+    } catch {
+      toast.error("Could not reach the billing agent - try again.");
+    } finally {
+      setTriggering(false);
+    }
+  }
 
   const pendingInvoice = useMemo(
     () =>
@@ -100,7 +115,7 @@ function PacketDetailPane({ packetId }: { packetId: number }) {
           {packet.status === "READY" && (
             <button
               disabled={auditing}
-              onClick={() => void api.post(`/api/billing/packets/${packetId}/audit`)}
+              onClick={runAudit}
               className="ml-auto flex items-center gap-1.5 rounded-md bg-tp-blue px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-tp-blue-strong disabled:opacity-50"
             >
               <Bot className="h-3.5 w-3.5" />

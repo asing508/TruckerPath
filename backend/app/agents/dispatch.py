@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from ..db import engine
-from ..models import PendingAction
+from ..models import ActionStatus, AgentRun, LiveLoad, LoadStatus, PendingAction, RunStatus
 from ..streams import broadcaster
 from .gemini import run_agent
 from .schemas import DispatchRecommendation
@@ -38,6 +38,33 @@ detention-prone consignee)."""
 
 
 async def recommend_for_load(load_id: str) -> dict:
+    # Guard runs synchronously (no `await` before it), so a double-click that
+    # fires two requests before the UI updates can't spawn two concurrent
+    # recommendations - and racing to reserve here is what makes it a serial
+    # section against other coroutines on the same event loop.
+    with Session(engine) as s:
+        load = s.get(LiveLoad, load_id)
+        if load is None:
+            return {"error": "load not found"}
+        if load.status != LoadStatus.UNASSIGNED:
+            return {"error": f"load already {load.status}"}
+        already_pending = s.exec(select(PendingAction).where(
+            PendingAction.kind == "ASSIGN_DRIVER",
+            PendingAction.subject_id == load_id,
+            PendingAction.status == ActionStatus.PENDING,
+        )).first()
+        if already_pending:
+            return {"error": "a recommendation is already pending for this load",
+                    "action_id": already_pending.id}
+        already_running = s.exec(select(AgentRun).where(
+            AgentRun.kind == "dispatch",
+            AgentRun.subject_id == load_id,
+            AgentRun.status == RunStatus.RUNNING,
+        )).first()
+        if already_running:
+            return {"error": "already recommending for this load",
+                    "run_id": already_running.id}
+
     result, run_id = await run_agent(
         kind="dispatch",
         subject_id=load_id,

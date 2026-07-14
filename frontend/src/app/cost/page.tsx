@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bot, ChevronDown, ChevronRight, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { toast } from "sonner";
 import {
   Bar,
   BarChart,
@@ -84,6 +85,7 @@ function AskFleet() {
   const [question, setQuestion] = useState("");
   const [watchingRun, setWatchingRun] = useState<number | null>(null);
   const [askedAt, setAskedAt] = useState<number>(0);
+  const [submitting, setSubmitting] = useState(false);
   const runs = useLive((s) => s.runs);
   const steps = useLive((s) => (watchingRun ? s.steps[watchingRun] ?? [] : []));
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -114,6 +116,22 @@ function AskFleet() {
     "Which customers cause the most detention over 2 hours?",
   ];
 
+  const busy = submitting || run?.status === "RUNNING";
+
+  async function ask(q: string) {
+    setWatchingRun(null);
+    setAskedAt(Date.now());
+    setSubmitting(true);
+    try {
+      const res = await api.post<{ error?: string }>("/api/analytics/ask", { question: q });
+      if (res.error) toast.error(res.error);
+    } catch {
+      toast.error("Could not reach the analyst agent - try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
     <section className="flex min-h-0 flex-col rounded-lg border border-tp-line bg-white">
       <header className="flex items-center gap-2 border-b border-tp-line px-3 py-2">
@@ -130,23 +148,23 @@ function AskFleet() {
         className="flex gap-2 border-b border-tp-line p-2.5"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!question.trim()) return;
-          setWatchingRun(null);
-          setAskedAt(Date.now());
-          void api.post("/api/analytics/ask", { question });
+          if (!question.trim() || busy) return;
+          void ask(question);
         }}
       >
         <input
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
+          disabled={busy}
           placeholder="e.g. What did detention cost us by customer last quarter?"
-          className="min-w-0 flex-1 rounded-md border border-tp-line px-3 py-2 text-[13px] focus:border-tp-blue focus:outline-none"
+          className="min-w-0 flex-1 rounded-md border border-tp-line px-3 py-2 text-[13px] focus:border-tp-blue focus:outline-none disabled:opacity-50"
         />
         <button
           type="submit"
-          className="flex items-center gap-1.5 rounded-md bg-tp-blue px-3.5 py-2 text-[12px] font-semibold text-white hover:bg-tp-blue-strong"
+          disabled={busy || !question.trim()}
+          className="flex items-center gap-1.5 rounded-md bg-tp-blue px-3.5 py-2 text-[12px] font-semibold text-white hover:bg-tp-blue-strong disabled:opacity-50"
         >
-          <Send className="h-3.5 w-3.5" /> Ask
+          <Send className="h-3.5 w-3.5" /> {busy ? "Working…" : "Ask"}
         </button>
       </form>
 
@@ -155,8 +173,9 @@ function AskFleet() {
           {EXAMPLES.map((q) => (
             <button
               key={q}
+              disabled={busy}
               onClick={() => setQuestion(q)}
-              className="rounded-full border border-tp-line px-2.5 py-1 text-[11px] text-tp-muted hover:border-tp-blue hover:text-tp-blue"
+              className="rounded-full border border-tp-line px-2.5 py-1 text-[11px] text-tp-muted hover:border-tp-blue hover:text-tp-blue disabled:opacity-50"
             >
               {q}
             </button>

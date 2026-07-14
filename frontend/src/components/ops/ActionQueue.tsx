@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, ChevronUp, XIcon } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
+import { toast } from "sonner";
 
 import { api } from "@/lib/api";
 import { usd } from "@/lib/format";
@@ -51,9 +52,19 @@ export function ActionCard({ action }: { action: PendingActionRow }) {
   const decide = useMutation({
     mutationFn: (approve: boolean) =>
       approve
-        ? api.post(`/api/actions/${action.id}/approve`, { draft_override: draft })
-        : api.post(`/api/actions/${action.id}/dismiss`),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["actions"] }),
+        ? api.post<{ ok?: boolean; note?: string; error?: string }>(
+            `/api/actions/${action.id}/approve`, { draft_override: draft })
+        : api.post<{ ok?: boolean; note?: string; error?: string }>(
+            `/api/actions/${action.id}/dismiss`),
+    onSuccess: (res) => {
+      if (res.error) {
+        toast.error(res.error);
+      } else if (res.note) {
+        toast.success(res.note);
+      }
+      void qc.invalidateQueries({ queryKey: ["actions"] });
+    },
+    onError: () => toast.error("Could not reach the server - try again."),
   });
 
   const impact = action.impact as {

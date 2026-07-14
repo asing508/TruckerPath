@@ -143,8 +143,16 @@ def tick(session: Session, now: datetime) -> list[FleetException]:
 def _detect_dark(session, trip, load, now) -> FleetException | None:
     if not trip.last_ping_at:
         return None
-    gap_min = (now - trip.last_ping_at).total_seconds() / 60.0
     existing = _find_active(session, ExceptionType.DARK_LOAD, trip_id=trip.trip_id)
+    # A known HOS break/reset silences pings by design - that's a legally
+    # mandated stop, not a comms blackout, and must never be flagged as one.
+    if trip.rest_until is not None and trip.rest_until > now:
+        if existing:
+            _resolve(session, existing, now,
+                     f"{trip.trip_id} silent for a scheduled HOS "
+                     f"{'reset' if trip.rest_kind == 'reset' else 'break'}, not a blackout")
+        return None
+    gap_min = (now - trip.last_ping_at).total_seconds() / 60.0
     if gap_min <= DARK_GAP_MIN:
         if existing and gap_min < 10:
             _resolve(session, existing, now,
