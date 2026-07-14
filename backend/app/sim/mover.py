@@ -96,6 +96,8 @@ def tick(session: Session, sim_now: datetime, dt: timedelta) -> None:
             _tick_linehaul(session, trip, driver, truck, sim_now, dt_hours)
         elif trip.status in (TripStatus.AT_PICKUP, TripStatus.AT_DELIVERY):
             _tick_dwell(session, trip, driver, truck, sim_now)
+        elif trip.status == TripStatus.EN_ROUTE_PICKUP:
+            _tick_deadhead(session, trip, driver, truck, sim_now)
         session.add_all([trip, driver, truck])
 
 
@@ -198,6 +200,42 @@ def _prune_pings(session: Session, trip_id: str) -> None:
     ).all()
     for stale_id in ids[PING_LOG_CAP_PER_TRIP:]:
         session.delete(session.get(PingLog, stale_id))
+
+
+def _tick_deadhead(
+    session: Session,
+    trip: LiveTrip,
+    driver: FleetDriver,
+    truck: FleetTruck,
+    sim_now: datetime,
+) -> None:
+    """Bobtail leg to the pickup dock: linear glide between stored endpoints."""
+    fault = _fault(trip)
+    leg = fault.get("assign")
+    if not leg or not trip.pickup_arrival_at:
+        trip.status = TripStatus.AT_PICKUP
+        trip.dwell_started_at = sim_now
+        return
+    depart = datetime.fromisoformat(leg["depart"])
+    total = (trip.pickup_arrival_at - depart).total_seconds()
+    f = 1.0 if total <= 0 else min(1.0, (sim_now - depart).total_seconds() / total)
+    (flat, flon), (tlat, tlon) = leg["from"], leg["to"]
+    truck.lat = flat + (tlat - flat) * f
+    truck.lon = flon + (tlon - flon) * f
+    truck.speed_mph = 42.0 if f < 1.0 else 0.0
+    driver.lat, driver.lon = truck.lat, truck.lon
+    trip.last_ping_at = sim_now
+    if sim_now >= trip.pickup_arrival_at:
+        load = session.get(LiveLoad, trip.load_id)
+        trip.status = TripStatus.AT_PICKUP
+        trip.dwell_facility_id = load.pickup_facility_id
+        trip.dwell_started_at = sim_now
+        set_duty(session, driver, DriverDuty.ON_DUTY, sim_now)
+        broadcaster.publish("feed", {
+            "kind": "at_pickup", "ts": sim_now,
+            "text": f"{truck.unit_number} checked in at {load.origin_city} shipper",
+            "trip_id": trip.trip_id,
+        })
 
 
 def _tick_dwell(

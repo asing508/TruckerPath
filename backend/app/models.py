@@ -176,6 +176,7 @@ class LiveTrip(SQLModel, table=True):
     geometry_id: int  # route_geometries row
     planned_eta: datetime
     started_at: datetime
+    pickup_arrival_at: Optional[datetime] = None  # deadhead leg ETA (EN_ROUTE_PICKUP)
     progress_miles: float = 0.0
     total_miles: float
     speed_ewma_mph: float = 0.0

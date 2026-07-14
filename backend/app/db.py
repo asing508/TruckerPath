@@ -50,19 +50,27 @@ _ALLOWED_ACTIONS = {
     sqlite3.SQLITE_RECURSIVE,
 }
 
+# Tables the LLM-generated SQL must never read: audit answer keys and agent
+# internals. Enforced at the authorizer level, not just omitted from prompts.
+_DENIED_TABLES = {"doc_packets", "agent_runs", "agent_steps", "pending_actions",
+                  "message_log", "invoices"}
+
 
 def readonly_connection() -> sqlite3.Connection:
     """Hardened connection for LLM-generated SQL.
 
     Defense in depth: the file is opened in SQLite read-only mode AND an
-    authorizer denies every action except SELECT/READ, so even a crafted
-    ATTACH/PRAGMA/INSERT statement is rejected at the VM level.
+    authorizer denies every action except SELECT/READ (with an explicit table
+    denylist), so a crafted ATTACH/PRAGMA/INSERT or a query against the audit
+    answer key is rejected at the SQLite VM level.
     """
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    conn.execute("PRAGMA query_only=ON")  # before the authorizer locks PRAGMA out
 
-    def authorizer(action: int, *_: object) -> int:
+    def authorizer(action: int, arg1, *_: object) -> int:
+        if action == sqlite3.SQLITE_READ and arg1 in _DENIED_TABLES:
+            return sqlite3.SQLITE_DENY
         return sqlite3.SQLITE_OK if action in _ALLOWED_ACTIONS else sqlite3.SQLITE_DENY
 
     conn.set_authorizer(authorizer)
-    conn.execute("PRAGMA query_only=ON")
     return conn

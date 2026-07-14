@@ -10,7 +10,14 @@ from sqlmodel import Session, select
 
 from ..config import SIM_TICK_WALL_SECONDS
 from ..db import engine as db_engine
-from ..models import FleetException, FleetTruck, LiveTrip, SimState, TripStatus
+from ..models import (
+    ExceptionType,
+    FleetException,
+    FleetTruck,
+    LiveTrip,
+    SimState,
+    TripStatus,
+)
 from ..streams import broadcaster
 from . import detectors, mover
 
@@ -62,8 +69,11 @@ class SimEngine:
             new_exceptions = detectors.tick(session, state.sim_now)
             session.commit()
 
+            # Auto-triage only time-critical in-transit incidents; maintenance
+            # sits in the queue for manual triage (and spares LLM quota).
             new_ids = [e.id for e in new_exceptions
-                       if e.severity in ("HIGH", "CRITICAL") and e.id is not None]
+                       if e.severity in ("HIGH", "CRITICAL") and e.id is not None
+                       and e.type != ExceptionType.MAINTENANCE_DUE]
 
             broadcaster.publish("tick", {
                 "sim_now": state.sim_now,
