@@ -42,8 +42,15 @@ def _sweep_orphaned_runs() -> None:
         for exc in stuck:
             exc.state = ExceptionState.OPEN
             s.add(exc)
-        if stale or stuck:
-            log.info("swept %d orphaned runs, %d stuck exceptions", len(stale), len(stuck))
+        from .models import DocPacket, PacketStatus
+        hung = s.exec(select(DocPacket).where(
+            DocPacket.status == PacketStatus.AUDITING)).all()
+        for p in hung:
+            p.status = PacketStatus.READY
+            s.add(p)
+        if stale or stuck or hung:
+            log.info("swept %d orphaned runs, %d stuck exceptions, %d hung audits",
+                     len(stale), len(stuck), len(hung))
         s.commit()
 
 
@@ -58,7 +65,19 @@ async def lifespan(app: FastAPI):
     model = resolve_model()
     log.info("gemini model resolved: %s", model)
 
+    # Auto-triage with a cooldown: at most 3 automatic runs per 10 wall-minutes,
+    # so background triage never starves interactive agents of LLM quota.
+    triage_times: list[float] = []
+
     async def on_exception(exception_id: int) -> None:
+        import time
+        now = time.monotonic()
+        triage_times[:] = [t for t in triage_times if now - t < 600]
+        if len(triage_times) >= 3:
+            log.info("auto-triage cooldown active; exception %d left in queue",
+                     exception_id)
+            return
+        triage_times.append(now)
         await triage_exception(exception_id)
 
     sim_engine.on_exception = on_exception

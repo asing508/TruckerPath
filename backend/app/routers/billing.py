@@ -1,7 +1,6 @@
 """Billing & document automation: packets, audits, invoices, files."""
 from __future__ import annotations
 
-import asyncio
 import json
 
 from fastapi import APIRouter, HTTPException
@@ -10,13 +9,11 @@ from sqlmodel import Session, select
 
 from ..agents import billing as billing_agent
 from ..config import DOCS_DIR, INVOICE_DIR
+from ..tasks import spawn
 from ..db import engine
 from ..models import DocPacket, Invoice, LiveLoad, SimState
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
-
-_background: set[asyncio.Task] = set()
-
 
 def _packet_dict(p: DocPacket, load: LiveLoad | None, sim_now) -> dict:
     recon = json.loads(p.reconciliation) if p.reconciliation != "{}" else None
@@ -89,9 +86,7 @@ def packet_detail(packet_id: int) -> dict:
 
 @router.post("/packets/{packet_id}/audit")
 async def audit(packet_id: int) -> dict:
-    task = asyncio.create_task(billing_agent.audit_packet(packet_id))
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    spawn(billing_agent.audit_packet(packet_id), name=f"audit:{packet_id}")
     return {"started": True}
 
 

@@ -1,7 +1,6 @@
 """Safety & compliance board + coaching briefs."""
 from __future__ import annotations
 
-import asyncio
 
 from fastapi import APIRouter
 from sqlmodel import Session, select
@@ -9,12 +8,10 @@ from sqlmodel import Session, select
 from ..agents import safety as safety_agent
 from ..agents.safety import compute_risk_board
 from ..db import engine
+from ..tasks import spawn
 from ..models import FleetTruck, SimState
 
 router = APIRouter(prefix="/api/safety", tags=["safety"])
-
-_background: set[asyncio.Task] = set()
-
 
 @router.get("/board")
 def board() -> dict:
@@ -36,7 +33,5 @@ def board() -> dict:
 
 @router.post("/brief/{driver_id}")
 async def brief(driver_id: str) -> dict:
-    task = asyncio.create_task(safety_agent.coaching_brief(driver_id))
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    spawn(safety_agent.coaching_brief(driver_id), name=f"brief:{driver_id}")
     return {"started": True}

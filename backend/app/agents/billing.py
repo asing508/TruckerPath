@@ -146,7 +146,7 @@ async def audit_packet(packet_id: int) -> dict:
             return {"error": "packet not found"}
         if packet.status == PacketStatus.AUDITING:
             return {"error": "already auditing"}
-        load = s.get(LiveLoad, packet.load_id)
+        load_id = packet.load_id
         docs = json.loads(packet.docs)
         system_feed = {k: v for k, v in json.loads(packet.truth).items()
                        if k in ("gps_dwell_minutes", "fuel_purchases_in_system")}
@@ -155,12 +155,12 @@ async def audit_packet(packet_id: int) -> dict:
         s.commit()
     broadcaster.publish("packet", {"id": packet_id, "status": "AUDITING"})
 
-    run_id, tracer = start_run("billing", packet.load_id)
+    run_id, tracer = start_run("billing", load_id)
     try:
         extraction: dict = {"FUEL_RECEIPTS": []}
         for doc in docs:
             schema, label = EXTRACT_SCHEMAS[doc["doc_type"]]
-            pdf_path = DOCS_DIR / packet.load_id / doc["filename"]
+            pdf_path = DOCS_DIR / load_id / doc["filename"]
             tracer.emit("tool_call", name="vision_extract",
                         payload={"document": doc["title"], "file": doc["filename"]})
             parsed = await structured_call(
@@ -181,7 +181,7 @@ async def audit_packet(packet_id: int) -> dict:
                 extraction[doc["doc_type"]] = data
 
         with Session(engine) as s:
-            load = s.get(LiveLoad, packet.load_id)
+            load = s.get(LiveLoad, load_id)
         recon = reconcile(extraction, load, system_feed)
         tracer.emit("tool_result", name="reconcile", payload={
             "diffs": recon["diffs"], "invoice_total": recon["invoice_total"],

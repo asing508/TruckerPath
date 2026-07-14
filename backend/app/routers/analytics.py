@@ -1,18 +1,15 @@
 """Cost intelligence: computed KPIs + CPM decomposition + ask-your-fleet."""
 from __future__ import annotations
 
-import asyncio
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..agents import analyst
 from ..db import raw_connection
+from ..tasks import spawn
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
-
-_background: set[asyncio.Task] = set()
-
 
 @router.get("/kpis")
 def kpis(year: str = "2024") -> dict:
@@ -141,7 +138,5 @@ class AskBody(BaseModel):
 
 @router.post("/ask")
 async def ask(body: AskBody) -> dict:
-    task = asyncio.create_task(analyst.ask(body.question))
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    spawn(analyst.ask(body.question), name="analyst")
     return {"started": True}

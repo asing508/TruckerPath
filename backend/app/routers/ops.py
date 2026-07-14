@@ -1,7 +1,6 @@
 """Dispatch board, exceptions, pending actions, agent runs."""
 from __future__ import annotations
 
-import asyncio
 import json
 
 from fastapi import APIRouter
@@ -12,6 +11,7 @@ from ..agents import dispatch as dispatch_agent
 from ..agents import triage as triage_agent
 from ..agents.executor import approve_action, dismiss_action
 from ..agents.tools_common import get_candidate_drivers
+from ..tasks import spawn
 from ..db import engine
 from ..models import (
     ActionStatus,
@@ -55,13 +55,8 @@ def dispatch_candidates(load_id: str) -> dict:
 
 @router.post("/dispatch/recommend/{load_id}")
 async def dispatch_recommend(load_id: str) -> dict:
-    task = asyncio.create_task(dispatch_agent.recommend_for_load(load_id))
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    spawn(dispatch_agent.recommend_for_load(load_id), name=f"dispatch:{load_id}")
     return {"started": True, "load_id": load_id}
-
-
-_background: set[asyncio.Task] = set()
 
 
 @router.get("/exceptions")
@@ -88,9 +83,7 @@ def exceptions(include_resolved: bool = False) -> list[dict]:
 
 @router.post("/exceptions/{exception_id}/triage")
 async def manual_triage(exception_id: int) -> dict:
-    task = asyncio.create_task(triage_agent.triage_exception(exception_id))
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    spawn(triage_agent.triage_exception(exception_id), name=f"triage:{exception_id}")
     return {"started": True}
 
 
