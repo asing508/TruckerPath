@@ -5,7 +5,7 @@ from datetime import datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlmodel import Session, delete
+from sqlmodel import Session, delete, select
 
 from ..db import engine, raw_connection
 from ..etl.docgen import build_packets
@@ -82,7 +82,6 @@ def reset() -> dict:
             # drop it now - the rows are about to disappear, and an in-flight
             # coroutine writing to them afterward degrades gracefully (see
             # finish_run's None-guard) but won't reach the client anymore.
-            from sqlmodel import select
             for run in s.exec(select(AgentRun).where(AgentRun.status == RunStatus.RUNNING)):
                 broadcaster.publish("agent_run", {"id": run.id, "status": "FAILED",
                                                   "summary": "cancelled by demo reset"})
