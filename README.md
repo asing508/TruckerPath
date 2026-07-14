@@ -1,8 +1,8 @@
-# Fleet Copilot — Trucker Path PM Take-Home
+# Fleet Copilot - Trucker Path PM Take-Home
 
 An **AI-native fleet operations assistant** for small fleets (5–50 trucks). It
 watches every load, investigates its own alarms with real LLM tool-calling,
-and hands the dispatcher **decisions instead of dashboards** — covering all
+and hands the dispatcher **decisions instead of dashboards** - covering all
 five problem areas from the brief: Smart Dispatch, Proactive Alerts, Cost
 Intelligence, Safety & Compliance, and Billing & Document Automation.
 
@@ -16,7 +16,7 @@ map, fires an alert, and waits for a human to do everything else. Fleet
 Copilot is built as a *system of agency*: deterministic watchdogs detect
 exceptions in live telemetry (dark loads, route deviation, ETA slip, dock
 detention, HOS risk, maintenance lapses), a Gemini agent investigates each one
-through read-only fleet tools, and the result is always a **pending action** —
+through read-only fleet tools, and the result is always a **pending action** -
 a drafted SMS/email/invoice with quantified impact that the dispatcher can
 edit inline and approve. The model reasons, the code computes (HOS ledger,
 detention math, invoice totals are never delegated to the LLM), and the human
