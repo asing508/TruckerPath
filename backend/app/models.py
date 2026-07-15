@@ -342,3 +342,13 @@ class SimState(SQLModel, table=True):
     sim_now: datetime
     speed: int
     running: bool = True
+
+
+class AiSpend(SQLModel, table=True):
+    """Gemini requests actually sent, per quota day (America/Los_Angeles,
+    matching Google's daily reset). Deliberately NOT wiped by demo reset or
+    server restart - Google's counter doesn't reset either."""
+    __tablename__ = "ai_spend"
+
+    day: str = Field(primary_key=True)
+    requests: int = 0

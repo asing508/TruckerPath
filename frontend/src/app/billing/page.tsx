@@ -10,7 +10,7 @@ import { ActionCard } from "@/components/ops/ActionQueue";
 import { AppShell } from "@/components/shell/AppShell";
 import { api, fileUrl } from "@/lib/api";
 import { mdhm, num, usd } from "@/lib/format";
-import { useActions, useLive } from "@/lib/hooks";
+import { useActions, useLive, useLiveInvalidation } from "@/lib/hooks";
 import type { PacketRow } from "@/lib/types";
 
 interface PacketsResponse {
@@ -63,6 +63,7 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
 }
 
 function PacketDetailPane({ packetId }: { packetId: number }) {
+  useLiveInvalidation("packet");
   const { data: packet } = useQuery({
     queryKey: ["packet", packetId],
     queryFn: () => api.get<PacketDetail>(`/api/billing/packets/${packetId}`),
@@ -235,6 +236,7 @@ function PacketDetailPane({ packetId }: { packetId: number }) {
 }
 
 export default function BillingPage() {
+  useLiveInvalidation("packets");
   const { data } = useQuery({
     queryKey: ["packets"],
     queryFn: () => api.get<PacketsResponse>("/api/billing/packets"),
@@ -266,9 +268,14 @@ export default function BillingPage() {
                 Delivered load packets
               </h1>
               <p className="text-[11px] text-tp-muted">
-                rate con · BOL · POD · fuel receipts, as submitted by drivers
+                Seeded demo submissions: rate con · BOL · POD · fuel receipts
               </p>
             </header>
+            <p className="border-b border-tp-line bg-blue-50/60 px-3 py-2 text-[10.5px] leading-snug text-tp-muted">
+              Prototype provenance: these PDFs are generated when the demo world is seeded.
+              Gemini reads the actual files; production ingestion would come from a driver
+              upload, email inbox, or TMS/ELD connector.
+            </p>
             <div className="min-h-0 flex-1 overflow-y-auto">
               {packets.map((p) => (
                 <button

@@ -5,6 +5,13 @@ export interface SimInfo {
   t0?: string;
 }
 
+export interface AiStatus {
+  auto_enabled: boolean;
+  used: number;
+  cap: number;
+  remaining: number;
+}
+
 export interface TruckPos {
   truck_id: string;
   unit: string;

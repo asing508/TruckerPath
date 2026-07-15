@@ -75,6 +75,10 @@ async def triage_exception(exception_id: int) -> dict:
                 exc.state = ExceptionState.OPEN  # let a human retry
                 s.add(exc)
                 s.commit()
+                broadcaster.publish("exception", {
+                    "id": exception_id,
+                    "state": "OPEN",
+                })
                 return {"run_id": run_id, "error": "agent failed"}
 
             assessment: TriageAssessment = result

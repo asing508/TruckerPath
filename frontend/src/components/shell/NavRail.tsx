@@ -4,7 +4,6 @@ import {
   FileCheck2,
   LineChart,
   Map as MapIcon,
-  Presentation,
   Route,
   ShieldCheck,
 } from "lucide-react";
@@ -40,17 +39,6 @@ export function NavRail() {
           </Link>
         );
       })}
-      <Link
-        href="/deck"
-        className={`mt-auto flex w-[64px] flex-col items-center gap-1 rounded-md py-2.5 text-[10px] font-medium tracking-wide ${
-          pathname === "/deck"
-            ? "bg-tp-blue text-white"
-            : "text-white/55 hover:bg-white/5 hover:text-white/90"
-        }`}
-      >
-        <Presentation className="h-[18px] w-[18px]" />
-        Deck
-      </Link>
     </nav>
   );
 }

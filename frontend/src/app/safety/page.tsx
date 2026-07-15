@@ -2,14 +2,14 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { Bot, ShieldAlert, Wrench } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
 
 import { AppShell } from "@/components/shell/AppShell";
 import { api } from "@/lib/api";
 import { minutesAsHours, num, pct } from "@/lib/format";
-import { useLive } from "@/lib/hooks";
+import { useLive, useLiveInvalidation } from "@/lib/hooks";
 
 interface RiskRow {
   driver_id: string;
@@ -63,29 +63,22 @@ function HosBar({ used, total }: { used: number; total: number }) {
 
 function BriefPanel({ driver }: { driver: RiskRow }) {
   const [requestedAt, setRequestedAt] = useState(0);
-  const [runId, setRunId] = useState<number | null>(null);
   const [requesting, setRequesting] = useState(false);
   const runs = useLive((s) => s.runs);
-  const steps = useLive((s) => (runId ? s.steps[runId] ?? [] : []));
-
-  useEffect(() => {
-    setRunId(null);
-    setRequestedAt(0);
-    setRequesting(false);
-  }, [driver.driver_id]);
-
-  useEffect(() => {
-    if (runId !== null || !requestedAt) return;
+  const runId = useMemo(() => {
+    if (!requestedAt) return null;
     const match = Object.values(runs)
       .filter(
-        (r) =>
-          r.kind === "safety" &&
-          r.subject_id === driver.driver_id &&
-          new Date(r.started_at).getTime() >= requestedAt - 4000,
+        (run) =>
+          run.kind === "safety" &&
+          run.subject_id === driver.driver_id &&
+          (!run.started_at ||
+            new Date(run.started_at).getTime() >= requestedAt - 4000),
       )
       .sort((a, b) => b.id - a.id)[0];
-    if (match) setRunId(match.id);
-  }, [runs, runId, requestedAt, driver.driver_id]);
+    return match?.id ?? null;
+  }, [driver.driver_id, requestedAt, runs]);
+  const steps = useLive((s) => (runId ? s.steps[runId] ?? [] : []));
 
   const output = steps.find((s) => s.kind === "output")?.payload as
     | { risk_level: string; brief_markdown: string; talking_points: string[] }
@@ -95,7 +88,6 @@ function BriefPanel({ driver }: { driver: RiskRow }) {
   async function generate() {
     setRequesting(true);
     setRequestedAt(Date.now());
-    setRunId(null);
     try {
       const res = await api.post<{ error?: string }>(`/api/safety/brief/${driver.driver_id}`);
       if (res.error) toast.error(res.error);
@@ -159,6 +151,7 @@ function BriefPanel({ driver }: { driver: RiskRow }) {
 }
 
 export default function SafetyPage() {
+  useLiveInvalidation("safety");
   const { data } = useQuery({
     queryKey: ["safety"],
     queryFn: () =>
@@ -258,7 +251,9 @@ export default function SafetyPage() {
         </section>
 
         <div className="flex min-h-0 flex-col gap-3 overflow-y-auto">
-          {selectedDriver && <BriefPanel driver={selectedDriver} />}
+          {selectedDriver && (
+            <BriefPanel key={selectedDriver.driver_id} driver={selectedDriver} />
+          )}
           <section className="rounded-lg border border-tp-line bg-white">
             <header className="flex items-center gap-2 border-b border-tp-line px-3 py-2">
               <Wrench className="h-4 w-4 text-tp-blue" />

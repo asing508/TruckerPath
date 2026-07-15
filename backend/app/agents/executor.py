@@ -32,6 +32,7 @@ from ..models import (
     SimState,
     TripStatus,
 )
+from ..sim.engine import sim_engine, snapshot_positions
 from ..sim.mover import set_duty
 from ..streams import broadcaster
 
@@ -47,33 +48,42 @@ def _sim_now(s: Session) -> datetime:
 
 
 def approve_action(action_id: int, draft_override: dict | None = None) -> dict:
-    with Session(engine) as s:
-        action = s.get(PendingAction, action_id)
-        if action is None:
-            return {"error": "action not found"}
-        if action.status != ActionStatus.PENDING:
-            return {"error": f"action already {action.status}"}
-        draft = json.loads(action.draft)
-        if draft_override:
-            draft.update({k: v for k, v in draft_override.items() if v is not None})
-            action.draft = json.dumps(draft)
+    events: list[tuple[str, dict]] = []
+    # The simulator and approval route can otherwise mutate the same
+    # trip/driver/truck/exception rows from different threads.
+    with sim_engine.mutation_guard():
+        with Session(engine) as s:
+            action = s.get(PendingAction, action_id)
+            if action is None:
+                return {"error": "action not found"}
+            if action.status != ActionStatus.PENDING:
+                return {"error": f"action already {action.status}"}
+            draft = json.loads(action.draft)
+            if draft_override:
+                draft.update({k: v for k, v in draft_override.items() if v is not None})
+                action.draft = json.dumps(draft)
 
-        now = _sim_now(s)
-        try:
-            note = _execute(s, action, draft, now)
-        except Exception as e:
-            # Leave the action PENDING so the dispatcher can edit and retry -
-            # a malformed draft or a transient OSRM/network hiccup should
-            # never silently eat an approval or 500 the whole request.
-            log.exception("action %s failed to execute", action_id)
-            s.rollback()
-            return {"error": f"execution failed: {e}"}
+            now = _sim_now(s)
+            try:
+                note = _execute(s, action, draft, now, events)
+            except Exception as e:
+                # Leave the action PENDING so the dispatcher can edit and retry -
+                # a malformed draft or a transient OSRM/network hiccup should
+                # never silently eat an approval or 500 the whole request.
+                log.exception("action %s failed to execute", action_id)
+                s.rollback()
+                return {"error": f"execution failed: {e}"}
 
-        action.status = ActionStatus.APPROVED
-        action.decided_at = datetime.now()
-        action.executed_note = note
-        s.add(action)
-        s.commit()
+            action.status = ActionStatus.APPROVED
+            action.decided_at = datetime.now()
+            action.executed_note = note
+            s.add(action)
+            s.commit()
+
+    # Publish only after the full transaction commits. This makes every SSE
+    # invalidation causally safe to refetch immediately.
+    for event, payload in events:
+        broadcaster.publish(event, payload)
     broadcaster.publish("action", {"id": action_id, "status": "APPROVED", "note": note})
     return {"ok": True, "note": note}
 
@@ -91,13 +101,19 @@ def dismiss_action(action_id: int) -> dict:
     return {"ok": True}
 
 
-def _execute(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
+def _execute(
+    s: Session,
+    action: PendingAction,
+    draft: dict,
+    now: datetime,
+    events: list[tuple[str, dict]],
+) -> str:
     if action.kind == "ASSIGN_DRIVER":
-        return _assign_driver(s, action, draft, now)
+        return _assign_driver(s, action, draft, now, events)
     if action.kind in ("SMS_DRIVER", "EMAIL_CUSTOMER", "MONITOR"):
-        return _comms(s, action, draft, now)
+        return _comms(s, action, draft, now, events)
     if action.kind == "SEND_INVOICE":
-        return _send_invoice(s, action, draft, now)
+        return _send_invoice(s, action, draft, now, events)
     return "no-op"
 
 
@@ -119,7 +135,13 @@ def _geometry_for(s: Session, o: tuple[str, str], d: tuple[str, str],
     return geom
 
 
-def _assign_driver(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
+def _assign_driver(
+    s: Session,
+    action: PendingAction,
+    draft: dict,
+    now: datetime,
+    events: list[tuple[str, dict]],
+) -> str:
     from ..db import raw_connection
 
     driver_id = draft.get("driver_id")
@@ -197,20 +219,33 @@ def _assign_driver(s: Session, action: PendingAction, draft: dict, now: datetime
     s.add(MessageLog(channel="SMS", to_name=driver.name, to_addr=driver.phone,
                      body=sms, related_trip_id=trip.trip_id,
                      related_load_id=load.load_id, sent_at=now))
-    broadcaster.publish("message", {"channel": "SMS", "to_name": driver.name,
-                                    "body": sms, "ts": now})
-    broadcaster.publish("feed", {
+    s.flush()
+    events.append(("fleet", {
+        "reason": "dispatch_assignment",
+        "trip_id": trip.trip_id,
+        "load_id": load.load_id,
+    }))
+    events.append(("positions", {"trucks": snapshot_positions(s)}))
+    events.append(("message", {"channel": "SMS", "to_name": driver.name,
+                               "body": sms, "ts": now}))
+    events.append(("feed", {
         "kind": "dispatch", "ts": now,
         "text": f"{driver.name} dispatched on {load.load_id} "
                 f"({load.origin_city} -> {load.dest_city}), unit {truck.unit_number}",
         "trip_id": trip.trip_id, "load_id": load.load_id,
-    })
+    }))
     return f"trip {trip.trip_id} created; SMS sent to {driver.name}"
 
 
 # ---- comms execution ----------------------------------------------------------
 
-def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
+def _comms(
+    s: Session,
+    action: PendingAction,
+    draft: dict,
+    now: datetime,
+    events: list[tuple[str, dict]],
+) -> str:
     impact = json.loads(action.impact)
     exc_id = impact.get("exception_id")
     notes = []
@@ -221,8 +256,12 @@ def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str
             s.add(MessageLog(channel="SMS", to_name=driver.name, to_addr=driver.phone,
                              body=draft["sms_body"], related_trip_id=action.subject_id,
                              sent_at=now))
-            broadcaster.publish("message", {"channel": "SMS", "to_name": driver.name,
-                                            "body": draft["sms_body"], "ts": now})
+            events.append(("message", {
+                "channel": "SMS",
+                "to_name": driver.name,
+                "body": draft["sms_body"],
+                "ts": now,
+            }))
             notes.append(f"SMS to {driver.name}")
         else:
             notes.append("trip/driver no longer active - SMS not sent")
@@ -235,8 +274,12 @@ def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str
                          subject=draft.get("email_subject", ""),
                          body=draft["email_body"],
                          related_trip_id=action.subject_id, sent_at=now))
-        broadcaster.publish("message", {"channel": "EMAIL", "to_name": to_name,
-                                        "subject": draft.get("email_subject", ""), "ts": now})
+        events.append(("message", {
+            "channel": "EMAIL",
+            "to_name": to_name,
+            "subject": draft.get("email_subject", ""),
+            "ts": now,
+        }))
         notes.append(f"email to {to_name}")
     if exc_id:
         exc = s.get(FleetException, exc_id)
@@ -244,13 +287,19 @@ def _comms(s: Session, action: PendingAction, draft: dict, now: datetime) -> str
             exc.state = ExceptionState.ACTIONED
             exc.updated_at = now
             s.add(exc)
-            broadcaster.publish("exception", {"id": exc_id, "state": "ACTIONED"})
+            events.append(("exception", {"id": exc_id, "state": "ACTIONED"}))
     return "; ".join(notes) if notes else "monitoring - no comms sent"
 
 
 # ---- billing execution ---------------------------------------------------------
 
-def _send_invoice(s: Session, action: PendingAction, draft: dict, now: datetime) -> str:
+def _send_invoice(
+    s: Session,
+    action: PendingAction,
+    draft: dict,
+    now: datetime,
+    events: list[tuple[str, dict]],
+) -> str:
     packet = s.get(DocPacket, int(action.subject_id))
     if packet is None:
         return "packet no longer exists"
@@ -281,15 +330,19 @@ def _send_invoice(s: Session, action: PendingAction, draft: dict, now: datetime)
                      to_addr=f"ap@{load.customer_name.lower().replace(' ', '')}.example",
                      subject=invoice.email_subject, body=invoice.email_body,
                      related_load_id=load.load_id, sent_at=now))
-    broadcaster.publish("packet", {"id": packet.id, "status": "INVOICED"})
-    broadcaster.publish("message", {"channel": "EMAIL", "to_name": load.customer_name,
-                                    "subject": invoice.email_subject, "ts": now})
-    broadcaster.publish("feed", {
+    events.append(("packet", {"id": packet.id, "status": "INVOICED"}))
+    events.append(("message", {
+        "channel": "EMAIL",
+        "to_name": load.customer_name,
+        "subject": invoice.email_subject,
+        "ts": now,
+    }))
+    events.append(("feed", {
         "kind": "invoice", "ts": now,
         "text": f"{inv_no} sent to {load.customer_name} - ${total:,.2f} "
                 f"({days:.1f} days after delivery)",
         "load_id": load.load_id,
-    })
+    }))
     return f"{inv_no} generated and emailed - ${total:,.2f}"
 
 

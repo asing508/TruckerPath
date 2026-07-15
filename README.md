@@ -6,7 +6,7 @@ and hands the dispatcher **decisions instead of dashboards** - covering all
 five problem areas from the brief: Smart Dispatch, Proactive Alerts, Cost
 Intelligence, Safety & Compliance, and Billing & Document Automation.
 
-> The product deck lives at `/deck` inside the app and as
+> The standalone product deck is
 > [`docs/Fleet-Copilot-Deck.pptx`](docs/Fleet-Copilot-Deck.pptx).
 
 ## The idea in one paragraph
@@ -28,7 +28,7 @@ decides.
 |---|---|
 | Frontend | Next.js 16 · React 19 · Tailwind v4 · shadcn/ui · MapLibre GL (keyless CARTO basemap) · TanStack Query · Recharts |
 | Backend | FastAPI · SQLModel · SQLite (WAL) · SSE (`sse-starlette`) |
-| AI | `google-genai` SDK · Gemini 3.5 Flash (auto-cascade to 3.1/2.5 on quota) · manual tool-loop with per-step tracing · Gemini Vision for document extraction |
+| AI | `google-genai` SDK · Gemini 3.5 Flash (per-model quota circuit breaker, ≤1 fallback per call) · manual tool-loop with per-step tracing · Gemini Vision for document extraction (persisted per document) · per-request daily budget, event-gated invocation |
 | Data | 3-year Class 8 carrier operations dataset (14 CSVs, ~550k rows) + simulated live plane (OSRM road geometry, FMCSA HOS ledger) |
 
 ## Run it locally
@@ -69,9 +69,12 @@ the scripted faults are *detected*, not hardcoded.
    Within a few sim-minutes the watchdog flags the scripted incidents: a load
    goes **dark** mid-route, a truck **drifts off corridor**, a slowdown pushes
    an ETA into **at-risk**, a dwell at the dock starts **accruing detention**,
-   and two drivers approach **mandatory HOS stops**. HIGH/CRITICAL exceptions
-   are auto-triaged by the agent; its proposals appear in the Action Queue.
-   Open **Agent trace** (top right) to watch the model's actual tool calls.
+   and two drivers approach **mandatory HOS stops**. Detection is fully
+   deterministic - no LLM is spent watching the fleet. Click **Send agent to
+   investigate** on any exception and open **Agent trace** (top right) to
+   watch the model's actual tool calls; or flip **auto-AI on** in the blue
+   strip to let the watchdog summon the agent itself for CRITICAL incidents
+   (at most one an hour, inside the daily budget).
 2. **Approve something** — edit the drafted SMS inline, hit *Approve &
    execute*, then open **Driver phone** to see what the driver received.
 3. **Dispatch** — pick an unassigned load, compare scored candidates
@@ -89,6 +92,9 @@ the scripted faults are *detected*, not hardcoded.
    system of record, and discrepancies surface with dollar impact (one packet
    hides an unclaimed **$142.50 detention** documented by POD dock times and
    corroborated by GPS dwell). Approve to generate and "send" the invoice PDF.
+   These packet PDFs are deterministic demo fixtures generated at seed/reset;
+   the prototype has no upload connector. A production version would ingest
+   driver scans, email attachments, or TMS/ELD document feeds.
 
 ## Architecture
 
@@ -105,8 +111,9 @@ archive/*.csv ──ETL──▶ SQLite warehouse (loads, trips, fuel, events, +
                               ▸ HOS ledger snapshots (FMCSA 11h/14h/70h·8d)
                               ▸ watchdog detectors (state machines + hysteresis)
                             │            │
-                            ▼            ▼ (HIGH/CRITICAL)
-                        SSE stream    triage agent (Gemini tool-loop)
+                            ▼            ▼ AI gate (human click, or CRITICAL
+                        SSE stream    triage agent   + auto-AI on + budget)
+                                      (Gemini tool-loop)
                             │            │
                             ▼            ▼
                       Next.js UI ◀── PendingAction (draft + impact + rationale)
@@ -120,6 +127,41 @@ is simulated forward** from it (the dataset ships no GPS pings or HOS — the
 deck covers this). Demo faults are injected into *telemetry*; every alert you
 see was detected by the watchdog, and every piece of AI output is a live
 Gemini call — the trace console proves both.
+
+## The AI gate: continuous intelligence, metered generation
+
+Fleet Copilot separates *operational* intelligence from *generative*
+intelligence. Deterministic code does everything with known rules — positions,
+ETAs, HOS math, exception detection, dedupe, prioritization, money math — and
+costs nothing to run continuously. The LLM is invoked only at decision
+boundaries, where explanation, ambiguity resolution, or communication adds
+value:
+
+- **On demand** — every AI feature is a button: investigate an exception,
+  recommend a driver, ask the fleet a question, write a coaching brief, audit
+  a packet.
+- **Event-gated autonomy (opt-in)** — with **auto-AI** switched on in the sim
+  strip, the watchdog may summon the triage agent itself, but only for a
+  CRITICAL incident, at most once an hour.
+- **Budgeted per request** — every actual Gemini API call (tool-loop step,
+  finalization, vision extraction) debits one unit from a daily budget
+  (`AI_DAILY_REQUEST_BUDGET`, default 100), counted at the HTTP call site so
+  the number means what Google's quota dashboard means. Spend persists in
+  SQLite keyed by the Pacific-time quota day — Google's reset boundary — so
+  neither a server restart nor a demo reset mints fresh budget. A workflow
+  is admitted only if a reserve (`AI_RUN_RESERVE_REQUESTS`, default 12)
+  remains, so runs are refused at the door rather than dying mid-flight.
+- **Circuit-broken** — a model that returns 429 is benched for a cooldown
+  instead of being retried, and one logical request may touch at most two
+  models' quota buckets, so an exhausted bucket is probed once, not hammered
+  by every fallback.
+- **Cached incrementally** — each document extraction is persisted the
+  moment it succeeds; a failed audit resumes at the document it died on, and
+  re-audits spend zero vision calls.
+
+This is what makes the design production-credible: the same architecture that
+survives a free-tier Gemini key is the one that keeps LLM spend sublinear in
+fleet size when the assistant runs a 500-truck operation.
 
 ## Deploy (optional, ~15 min)
 
@@ -143,10 +185,10 @@ just re-seeds a fresh world). On Railway's free tier, keep one instance.
 backend/app/etl/        CSV→SQLite loader, derived stats, world builder, OSRM cache, doc PDFs
 backend/app/hos/        FMCSA ledger + legal-schedule generator (unit-tested)
 backend/app/sim/        clock, mover (rest stops, fault scripts), watchdog detectors
-backend/app/agents/     Gemini harness (tool loop, tracing, quota cascade) + 5 agents + executor
+backend/app/agents/     Gemini harness (tool loop, tracing, circuit breaker, run budget) + 5 agents + executor
 backend/app/routers/    REST + SSE surface
-backend/tests/          26 tests
-frontend/src/app/       operations · dispatch · cost · safety · billing · deck
+backend/tests/          34 tests
+frontend/src/app/       operations · dispatch · cost · safety · billing
 frontend/src/components shell, map, action cards, trace drawer, driver phone, charts
 docs/                   deck source + Fleet-Copilot-Deck.pptx + GTM.md
 archive/                source dataset (14 CSVs)

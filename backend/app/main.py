@@ -1,8 +1,11 @@
 """Fleet Copilot backend.
 
 Boot order: ensure the database exists (auto-seed on first run), resolve the
-Gemini model, start the simulation loop, and wire the watchdog to the triage
-agent so HIGH/CRITICAL exceptions get investigated automatically.
+Gemini model, start the simulation loop, and wire the watchdog to the AI gate:
+detection stays deterministic and continuous, but the triage agent auto-runs
+only for CRITICAL incidents, only when auto-investigate is switched on, at
+most once an hour, inside the daily AI budget. Everything else waits in the
+queue for a human to click "investigate".
 """
 from __future__ import annotations
 
@@ -65,19 +68,25 @@ async def lifespan(app: FastAPI):
     model = resolve_model()
     log.info("gemini model resolved: %s", model)
 
-    # Auto-triage with a cooldown: at most 3 automatic runs per 10 wall-minutes,
-    # so background triage never starves interactive agents of LLM quota.
-    triage_times: list[float] = []
-
     async def on_exception(exception_id: int) -> None:
-        import time
-        now = time.monotonic()
-        triage_times[:] = [t for t in triage_times if now - t < 600]
-        if len(triage_times) >= 3:
-            log.info("auto-triage cooldown active; exception %d left in queue",
+        # The AI gate: the watchdog may only summon the LLM for a CRITICAL
+        # incident, and ai_budget enforces the toggle (default off), the
+        # one-auto-run-per-hour cap, and the daily budget. HIGH and below
+        # sit in the queue until a dispatcher clicks "investigate".
+        from sqlmodel import Session
+
+        from .agents.budget import ai_budget
+        from .db import engine
+        from .models import FleetException
+
+        with Session(engine) as s:
+            exc = s.get(FleetException, exception_id)
+            if exc is None or exc.severity != "CRITICAL":
+                return
+        if not ai_budget.allow_auto():
+            log.info("AI gate closed; exception %d queued for manual triage",
                      exception_id)
             return
-        triage_times.append(now)
         await triage_exception(exception_id)
 
     sim_engine.on_exception = on_exception

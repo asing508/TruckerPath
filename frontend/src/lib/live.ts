@@ -1,12 +1,14 @@
 "use client";
 
-/* Single SSE connection -> external store. Slices get new references only
-   when they change, so useSyncExternalStore subscribers re-render narrowly. */
+/* Single SSE connection -> immutable external-store snapshots. */
+
+import { toast } from "sonner";
 
 import { API_URL } from "./api";
 import type {
   AgentRunRow,
   AgentStepRow,
+  AiStatus,
   FeedItem,
   SimInfo,
   TruckPos,
@@ -15,6 +17,7 @@ import type {
 export interface LiveState {
   connected: boolean;
   sim: SimInfo | null;
+  ai: AiStatus | null;
   trucks: TruckPos[];
   feed: FeedItem[];
   runs: Record<number, AgentRunRow>;
@@ -28,17 +31,20 @@ type Listener = () => void;
 const FEED_CAP = 120;
 const STEP_CAP = 160;
 
+const INITIAL_STATE: LiveState = {
+  connected: false,
+  sim: null,
+  ai: null,
+  trucks: [],
+  feed: [],
+  runs: {},
+  steps: {},
+  lastRunUpdate: 0,
+  invalidations: {},
+};
+
 class LiveStore {
-  state: LiveState = {
-    connected: false,
-    sim: null,
-    trucks: [],
-    feed: [],
-    runs: {},
-    steps: {},
-    lastRunUpdate: 0,
-    invalidations: {},
-  };
+  state: LiveState = INITIAL_STATE;
   private listeners = new Set<Listener>();
   private source: EventSource | null = null;
 
@@ -51,6 +57,7 @@ class LiveStore {
   };
 
   getSnapshot = () => this.state;
+  getServerSnapshot = () => INITIAL_STATE;
 
   private emit() {
     for (const fn of this.listeners) fn();
@@ -65,6 +72,35 @@ class LiveStore {
       },
     };
   }
+
+  setAi = (ai: AiStatus) => {
+    this.state = { ...this.state, ai };
+    this.emit();
+  };
+
+  mergeSim = (patch: Partial<SimInfo>) => {
+    const current = this.state.sim;
+    if (
+      !current &&
+      (typeof patch.sim_now !== "string" ||
+        typeof patch.speed !== "number" ||
+        typeof patch.running !== "boolean")
+    ) {
+      return;
+    }
+    const sim = { ...current, ...patch } as SimInfo;
+    if (
+      current &&
+      sim.sim_now === current.sim_now &&
+      sim.speed === current.speed &&
+      sim.running === current.running &&
+      sim.t0 === current.t0
+    ) {
+      return;
+    }
+    this.state = { ...this.state, sim };
+    this.emit();
+  };
 
   ensureConnected() {
     if (this.source || typeof window === "undefined") return;
@@ -83,11 +119,20 @@ class LiveStore {
       this.state = { ...this.state, sim: JSON.parse(e.data) };
       this.emit();
     });
-    es.addEventListener("tick_control", () => {
-      // authoritative values arrive with the next tick
+    es.addEventListener("tick_control", (e) => {
+      this.mergeSim(JSON.parse(e.data) as Partial<SimInfo>);
+    });
+    es.addEventListener("ai_status", (e) => {
+      this.setAi(JSON.parse(e.data) as AiStatus);
+    });
+    es.addEventListener("ai_denied", (e) => {
+      const { reason } = JSON.parse(e.data) as { reason: string };
+      toast.warning(`AI run refused: ${reason}`);
     });
     es.addEventListener("positions", (e) => {
       this.state = { ...this.state, trucks: JSON.parse(e.data).trucks };
+      this.bump("fleet");
+      this.bump("safety");
       this.emit();
     });
     es.addEventListener("feed", (e) => {
@@ -124,10 +169,23 @@ class LiveStore {
     });
     for (const [event, keys] of [
       ["exception", ["exceptions", "fleet"]],
-      ["action", ["actions", "dispatch"]],
+      ["action", ["actions", "dispatch", "candidates", "fleet"]],
       ["message", ["messages"]],
-      ["packet", ["packets"]],
-      ["world_reset", ["exceptions", "actions", "messages", "packets", "fleet", "dispatch"]],
+      ["packet", ["packets", "packet"]],
+      [
+        "world_reset",
+        [
+          "exceptions",
+          "actions",
+          "messages",
+          "packets",
+          "packet",
+          "fleet",
+          "dispatch",
+          "candidates",
+          "safety",
+        ],
+      ],
     ] as const) {
       es.addEventListener(event, () => {
         for (const k of keys) this.bump(k);

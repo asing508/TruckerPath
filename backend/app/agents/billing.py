@@ -2,6 +2,8 @@
 
 Three phases per packet:
   1. VISION (real LLM): Gemini reads each PDF and extracts typed fields.
+     Extractions persist on the packet; a re-audit reuses them (docs are
+     immutable), so vision quota is spent at most once per document.
   2. RECONCILE (deterministic): code diffs the extraction against the system
      of record - rate, accessorials, weight, receipt count, and detention
      recomputed from documented dock times cross-checked against GPS dwell.
@@ -24,6 +26,7 @@ from ..config import DETENTION_FREE_MIN, DETENTION_RATE_PER_HR, DOCS_DIR, GEMINI
 from ..db import engine
 from ..models import DocPacket, LiveLoad, PacketStatus, PendingAction
 from ..streams import broadcaster
+from .budget import ai_budget
 from .gemini import Tracer, finish_run, start_run, structured_call
 from .schemas import (
     BillingAudit,
@@ -45,6 +48,31 @@ VISION_SYSTEM = (
     "Read carefully, keep numbers exactly as printed (no rounding), use 0 for "
     "charges that do not appear. Times must be HH:MM 24h as printed."
 )
+
+
+def resume_state(docs: list[dict], prior_extraction: str) -> tuple[dict, set[str]]:
+    """(extraction dict, filenames already extracted) for an audit attempt.
+
+    Extraction is persisted after every document, so a run that died on doc 5
+    resumes at doc 5 instead of re-buying four vision calls. The "_done" key
+    tracks filenames; extractions saved before that key existed came from a
+    fully successful audit, so every listed doc counts as done."""
+    if prior_extraction == "{}":
+        return {"FUEL_RECEIPTS": []}, set()
+    extraction = json.loads(prior_extraction)
+    extraction.setdefault("FUEL_RECEIPTS", [])
+    if "_done" in extraction:
+        return extraction, set(extraction["_done"])
+    return extraction, {d["filename"] for d in docs}
+
+
+def _persist_extraction(packet_id: int, extraction: dict) -> None:
+    with Session(engine) as s:
+        packet = s.get(DocPacket, packet_id)
+        if packet is not None:
+            packet.extraction = json.dumps(extraction)
+            s.add(packet)
+            s.commit()
 
 
 def _parse_hhmm(v: str) -> int | None:
@@ -146,8 +174,11 @@ async def audit_packet(packet_id: int) -> dict:
             return {"error": "packet not found"}
         if packet.status == PacketStatus.AUDITING:
             return {"error": "already auditing"}
+        if not ai_budget.try_start_run("billing"):
+            return {"error": "AI budget exhausted"}
         load_id = packet.load_id
         docs = json.loads(packet.docs)
+        prior_extraction = packet.extraction
         system_feed = {k: v for k, v in json.loads(packet.truth).items()
                        if k in ("gps_dwell_minutes", "fuel_purchases_in_system")}
         packet.status = PacketStatus.AUDITING
@@ -157,8 +188,17 @@ async def audit_packet(packet_id: int) -> dict:
 
     run_id, tracer = start_run("billing", load_id)
     try:
-        extraction: dict = {"FUEL_RECEIPTS": []}
+        # Documents in the packet archive are immutable, so extractions are
+        # bought at most once per document: saved after every doc, resumed on
+        # retry, and reused wholesale on a re-audit.
+        extraction, done = resume_state(docs, prior_extraction)
+        if done:
+            tracer.emit("tool_result", name="cached_extraction",
+                        payload={"note": f"{len(done)} of {len(docs)} document(s) "
+                                         "already extracted; no vision calls re-spent"})
         for doc in docs:
+            if doc["filename"] in done:
+                continue
             schema, label = EXTRACT_SCHEMAS[doc["doc_type"]]
             pdf_path = DOCS_DIR / load_id / doc["filename"]
             tracer.emit("tool_call", name="vision_extract",
@@ -179,6 +219,9 @@ async def audit_packet(packet_id: int) -> dict:
                 extraction["FUEL_RECEIPTS"].append(data)
             else:
                 extraction[doc["doc_type"]] = data
+            done.add(doc["filename"])
+            extraction["_done"] = sorted(done)
+            _persist_extraction(packet_id, extraction)
 
         with Session(engine) as s:
             load = s.get(LiveLoad, load_id)

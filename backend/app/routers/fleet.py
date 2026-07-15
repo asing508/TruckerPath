@@ -19,10 +19,12 @@ from ..models import (
     MessageLog,
     PendingAction,
     RouteGeometry,
+    RunStatus,
     SimState,
     TripStatus,
 )
-from ..sim.engine import snapshot_positions
+from ..agents.budget import ai_budget
+from ..sim.engine import snapshot_positions, snapshot_sim_state
 from ..streams import broadcaster
 
 router = APIRouter(prefix="/api", tags=["fleet"])
@@ -122,13 +124,40 @@ def messages(limit: int = 30) -> list[dict]:
 @router.get("/stream")
 async def stream():
     async def gen():
-        with Session(engine) as s:
-            state = s.get(SimState, 1)
-            yield {"event": "tick", "data": json.dumps({
-                "sim_now": state.sim_now.isoformat(), "speed": state.speed,
-                "running": state.running})}
-            yield {"event": "positions",
-                   "data": json.dumps({"trucks": snapshot_positions(s)})}
-        async for event, payload in broadcaster.stream():
-            yield {"event": event, "data": payload}
+        # Subscribe first, then take the DB snapshot. Any event committed
+        # during the snapshot is queued and delivered afterward, closing the
+        # old snapshot-to-subscription race.
+        async with broadcaster.subscribe() as q:
+            with Session(engine) as s:
+                state = s.get(SimState, 1)
+                tick_payload = json.dumps(snapshot_sim_state(state), default=str)
+                positions_payload = json.dumps({"trucks": snapshot_positions(s)})
+                # Reconnecting in the middle of an LLM call must not strand a
+                # page waiting for a start event that happened on the old SSE
+                # connection.
+                running = s.exec(select(AgentRun).where(
+                    AgentRun.status == RunStatus.RUNNING
+                ).order_by(AgentRun.started_at)).all()  # type: ignore[arg-type]
+                run_payloads = [
+                    json.dumps({
+                        "id": run.id,
+                        "kind": run.kind,
+                        "subject_id": run.subject_id,
+                        "status": run.status,
+                        "model": run.model,
+                        "summary": run.summary,
+                        "error": run.error,
+                        "started_at": run.started_at,
+                        "finished_at": run.finished_at,
+                    }, default=str)
+                    for run in running
+                ]
+            yield {"event": "tick", "data": tick_payload}
+            yield {"event": "positions", "data": positions_payload}
+            yield {"event": "ai_status", "data": json.dumps(ai_budget.status())}
+            for payload in run_payloads:
+                yield {"event": "agent_run", "data": payload}
+            while True:
+                event, payload = await q.get()
+                yield {"event": event, "data": payload}
     return EventSourceResponse(gen())

@@ -21,6 +21,18 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
+# ---- AI event gate ----------------------------------------------------------
+# Generative AI is budgeted: detection is deterministic and free, every actual
+# Gemini request is metered (persisted per Pacific-time quota day, matching
+# Google's reset). Auto-investigation defaults OFF so the demo spends quota
+# only when a human clicks (Option B: event-gated hybrid).
+AI_DAILY_REQUEST_BUDGET = int(os.getenv("AI_DAILY_REQUEST_BUDGET", "100"))
+# A tool-loop run makes up to ~11 requests; don't admit a run without this
+# much headroom, so it can't die halfway through an investigation.
+AI_RUN_RESERVE_REQUESTS = int(os.getenv("AI_RUN_RESERVE_REQUESTS", "12"))
+AI_AUTO_INVESTIGATE_DEFAULT = os.getenv("AI_AUTO_INVESTIGATE", "0") == "1"
+AI_AUTO_MIN_GAP_S = int(os.getenv("AI_AUTO_MIN_GAP_S", "3600"))
+
 # Resolved at startup against ListModels; first available wins.
 MODEL_PREFERENCE = [
     "gemini-3.5-flash",

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Bot, ChevronDown, ChevronRight, Send } from "lucide-react";
+import { Bot, ChevronRight, Send } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { toast } from "sonner";
@@ -83,25 +83,29 @@ function Tile({ label, value, sub }: { label: string; value: string; sub?: strin
 
 function AskFleet() {
   const [question, setQuestion] = useState("");
-  const [watchingRun, setWatchingRun] = useState<number | null>(null);
-  const [askedAt, setAskedAt] = useState<number>(0);
+  const [request, setRequest] = useState<{
+    question: string;
+    askedAt: number;
+  } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const runs = useLive((s) => s.runs);
-  const steps = useLive((s) => (watchingRun ? s.steps[watchingRun] ?? [] : []));
+  const runId = useMemo(() => {
+    if (!request) return null;
+    const match = Object.values(runs)
+      .filter(
+        (run) =>
+          run.kind === "analyst" &&
+          run.subject_id === request.question.slice(0, 120) &&
+          (!run.started_at ||
+            new Date(run.started_at).getTime() >= request.askedAt - 4000),
+      )
+      .sort((a, b) => b.id - a.id)[0];
+    return match?.id ?? null;
+  }, [request, runs]);
+  const steps = useLive((s) => (runId ? s.steps[runId] ?? [] : []));
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // adopt the newest analyst run started after our ask
-  useEffect(() => {
-    if (watchingRun !== null) return;
-    const candidates = Object.values(runs).filter(
-      (r) => r.kind === "analyst" && new Date(r.started_at).getTime() >= askedAt - 4000,
-    );
-    if (askedAt && candidates.length > 0) {
-      setWatchingRun(candidates.sort((a, b) => b.id - a.id)[0].id);
-    }
-  }, [runs, askedAt, watchingRun]);
-
-  const run: AgentRunRow | undefined = watchingRun ? runs[watchingRun] : undefined;
+  const run: AgentRunRow | undefined = runId ? runs[runId] : undefined;
   const output = steps.find((s) => s.kind === "output")?.payload as
     | { answer_markdown: string; sql_used?: string; chart?: ChartSpec }
     | undefined;
@@ -119,8 +123,7 @@ function AskFleet() {
   const busy = submitting || run?.status === "RUNNING";
 
   async function ask(q: string) {
-    setWatchingRun(null);
-    setAskedAt(Date.now());
+    setRequest({ question: q, askedAt: Date.now() });
     setSubmitting(true);
     try {
       const res = await api.post<{ error?: string }>("/api/analytics/ask", { question: q });
@@ -168,7 +171,7 @@ function AskFleet() {
         </button>
       </form>
 
-      {!askedAt && (
+      {!request && (
         <div className="flex flex-wrap gap-1.5 p-2.5">
           {EXAMPLES.map((q) => (
             <button
@@ -183,7 +186,7 @@ function AskFleet() {
         </div>
       )}
 
-      {askedAt > 0 && (
+      {request && (
         <div className="min-h-0 flex-1 overflow-y-auto p-3" ref={scrollRef}>
           <div className="mb-2 space-y-0.5">
             {steps

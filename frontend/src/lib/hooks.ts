@@ -14,24 +14,25 @@ import type {
 } from "./types";
 
 export function useLive<T>(selector: (s: LiveState) => T): T {
-  return useSyncExternalStore(
+  const state = useSyncExternalStore(
     liveStore.subscribe,
-    () => selector(liveStore.state),
-    () => selector(liveStore.state),
+    liveStore.getSnapshot,
+    liveStore.getServerSnapshot,
   );
+  return selector(state);
 }
 
 /** Re-fetch a query when the SSE stream says its domain changed. */
-function useInvalidation(key: string) {
+export function useLiveInvalidation(key: string) {
   const version = useLive((s) => s.invalidations[key] ?? 0);
   const qc = useQueryClient();
   useEffect(() => {
     if (version > 0) void qc.invalidateQueries({ queryKey: [key] });
-  }, [version, qc]);
+  }, [key, version, qc]);
 }
 
 export function useFleetState() {
-  useInvalidation("fleet");
+  useLiveInvalidation("fleet");
   return useQuery({
     queryKey: ["fleet"],
     queryFn: () => api.get<FleetState>("/api/fleet/state"),
@@ -40,7 +41,7 @@ export function useFleetState() {
 }
 
 export function useExceptions() {
-  useInvalidation("exceptions");
+  useLiveInvalidation("exceptions");
   return useQuery({
     queryKey: ["exceptions"],
     queryFn: () => api.get<ExceptionRow[]>("/api/exceptions"),
@@ -49,7 +50,7 @@ export function useExceptions() {
 }
 
 export function useActions() {
-  useInvalidation("actions");
+  useLiveInvalidation("actions");
   return useQuery({
     queryKey: ["actions"],
     queryFn: () => api.get<PendingActionRow[]>("/api/actions"),
@@ -58,7 +59,7 @@ export function useActions() {
 }
 
 export function useMessages() {
-  useInvalidation("messages");
+  useLiveInvalidation("messages");
   return useQuery({
     queryKey: ["messages"],
     queryFn: () => api.get<MessageRow[]>("/api/messages"),

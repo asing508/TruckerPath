@@ -25,6 +25,7 @@ from ..config import GEMINI_API_KEY, GEMINI_MODEL, MODEL_PREFERENCE
 from ..db import engine as db_engine
 from ..models import AgentRun, AgentStep, RunStatus
 from ..streams import broadcaster
+from .budget import ai_budget
 
 log = logging.getLogger("agents")
 
@@ -83,29 +84,44 @@ class Tracer:
         data = json.dumps(payload, default=str) if payload is not None else "{}"
         if len(data) > 4000:  # keep stored payloads JSON-valid when truncating
             data = json.dumps({"truncated": True, "preview": data[:3600]})
+        ts = datetime.now()
         with Session(db_engine) as s:
             s.add(AgentStep(run_id=self.run_id, seq=self.seq, kind=kind,
-                            name=name, payload=data, ts=datetime.now()))
+                            name=name, payload=data, ts=ts))
             s.commit()
         broadcaster.publish("agent_step", {
             "run_id": self.run_id, "seq": self.seq, "kind": kind,
             "name": name, "payload": json.loads(data) if payload is not None else None,
+            "ts": ts,
         })
 
 
 def start_run(kind: str, subject_id: str) -> tuple[int, Tracer]:
+    started_at = datetime.now()
+    model = resolve_model()
     with Session(db_engine) as s:
-        run = AgentRun(kind=kind, subject_id=subject_id, model=resolve_model(),
-                       started_at=datetime.now())
+        run = AgentRun(kind=kind, subject_id=subject_id, model=model,
+                       started_at=started_at)
         s.add(run)
         s.commit()
         s.refresh(run)
-    broadcaster.publish("agent_run", {"id": run.id, "kind": kind,
-                                      "subject_id": subject_id, "status": "RUNNING"})
-    return run.id, Tracer(run.id)
+        run_id = run.id
+    broadcaster.publish("agent_run", {
+        "id": run_id,
+        "kind": kind,
+        "subject_id": subject_id,
+        "status": "RUNNING",
+        "model": model,
+        "summary": "",
+        "error": "",
+        "started_at": started_at,
+        "finished_at": None,
+    })
+    return run_id, Tracer(run_id)
 
 
 def finish_run(run_id: int, summary: str, error: str = "") -> None:
+    finished_at = datetime.now()
     with Session(db_engine) as s:
         run = s.get(AgentRun, run_id)
         if run is None:
@@ -116,11 +132,16 @@ def finish_run(run_id: int, summary: str, error: str = "") -> None:
         run.status = RunStatus.FAILED if error else RunStatus.DONE
         run.summary = summary[:2000]
         run.error = error[:2000]
-        run.finished_at = datetime.now()
+        run.finished_at = finished_at
         s.add(run)
         s.commit()
-    broadcaster.publish("agent_run", {"id": run_id, "status": "FAILED" if error else "DONE",
-                                      "summary": summary[:400]})
+    broadcaster.publish("agent_run", {
+        "id": run_id,
+        "status": "FAILED" if error else "DONE",
+        "summary": summary[:400],
+        "error": error[:400],
+        "finished_at": finished_at,
+    })
 
 
 _pace_lock = asyncio.Lock()
@@ -150,27 +171,57 @@ async def _pace() -> None:
         _last_call_at = asyncio.get_event_loop().time()
 
 
+# Circuit breaker: a model that returns 429 is benched until the timestamp
+# below, so one exhausted quota bucket is probed once per cooldown instead of
+# being re-hit by every call (which is how a cascade multiplies requests).
+_cooldown_until: dict[str, float] = {}
+_QUOTA_COOLDOWN_S = 15 * 60
+
+
+async def _call_model(m: str, **kwargs) -> types.GenerateContentResponse:
+    if not ai_budget.spend_request():
+        raise RuntimeError(
+            "daily AI request budget exhausted - quota resets at midnight "
+            "Pacific time (raise AI_DAILY_REQUEST_BUDGET to override)")
+    await _pace()
+    return await client().aio.models.generate_content(model=m, **kwargs)
+
+
 async def _generate(model: str, **kwargs) -> types.GenerateContentResponse:
-    """Generate with free-tier survival: paced calls, per-model retry that
-    honors the server's suggested delay, then cascade to the next model in
-    MODEL_PREFERENCE - each model has its own quota bucket."""
-    chain = [model] + [m for m in MODEL_PREFERENCE if m != model]
+    """Paced, circuit-broken generation. A short server-suggested retry delay
+    (an RPM blip) is honored once on the same model; a real quota exhaustion
+    benches the model for a cooldown and moves on. One logical request may
+    touch at most two models' quota buckets (primary + one fallback)."""
+    now = asyncio.get_event_loop().time()
+    ordered = list(dict.fromkeys([model, *MODEL_PREFERENCE]))
+    chain = [m for m in ordered if _cooldown_until.get(m, 0.0) <= now][:2]
+    if not chain:
+        wait = min(_cooldown_until[m] for m in ordered) - now
+        raise RuntimeError(
+            f"all Gemini models are cooling down after quota errors; "
+            f"next probe in ~{max(1, int(wait))}s")
     last: Exception | None = None
     for m in chain:
-        for attempt in range(2):
-            await _pace()
-            try:
-                return await client().aio.models.generate_content(model=m, **kwargs)
-            except Exception as e:
-                last = e
-                if _is_quota(e):
-                    delay = _retry_delay_s(e)
-                    if delay is not None and delay <= 20 and attempt == 0:
-                        await asyncio.sleep(delay + 1.0)
+        try:
+            return await _call_model(m, **kwargs)
+        except Exception as e:
+            last = e
+            if not _is_quota(e):
+                await asyncio.sleep(1.5)  # transient server hiccup
+                continue
+            delay = _retry_delay_s(e)
+            if delay is not None and delay <= 15:
+                await asyncio.sleep(delay + 1.0)
+                try:
+                    return await _call_model(m, **kwargs)
+                except Exception as e2:
+                    last = e2
+                    if not _is_quota(e2):
                         continue
-                    log.warning("quota hit on %s -> cascading to next model", m)
-                    break  # next model, separate quota
-                await asyncio.sleep(1.5 * (attempt + 1))
+                    delay = _retry_delay_s(e2)
+            bench = max(delay or 0.0, _QUOTA_COOLDOWN_S)
+            _cooldown_until[m] = asyncio.get_event_loop().time() + bench
+            log.warning("quota exhausted on %s; benched for %ds", m, int(bench))
     raise last  # type: ignore[misc]
 
 
@@ -186,6 +237,8 @@ async def run_agent(
     temperature: float = 0.3,
 ) -> tuple[BaseModel | None, int]:
     """Tool loop then structured finalization. Returns (output, run_id)."""
+    if not ai_budget.try_start_run(kind):
+        return None, 0
     run_id, tracer = start_run(kind, subject_id)
     model = resolve_model()
     registry = {t.name: t for t in tools}

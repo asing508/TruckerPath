@@ -1,6 +1,5 @@
 "use client";
 
-import { usePathname } from "next/navigation";
 import { useState } from "react";
 
 import { DriverPhone } from "@/components/ops/DriverPhone";
@@ -14,12 +13,6 @@ import { TopBar } from "./TopBar";
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [phoneOpen, setPhoneOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
-  const pathname = usePathname();
-
-  if (pathname === "/deck") {
-    return <>{children}</>;
-  }
-
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <TopBar

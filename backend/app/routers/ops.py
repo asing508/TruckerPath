@@ -9,6 +9,7 @@ from sqlmodel import Session, select
 
 from ..agents import dispatch as dispatch_agent
 from ..agents import triage as triage_agent
+from ..agents.budget import ai_budget
 from ..agents.executor import approve_action, dismiss_action
 from ..agents.tools_common import get_candidate_drivers
 from ..tasks import spawn
@@ -85,6 +86,22 @@ def exceptions(include_resolved: bool = False) -> list[dict]:
 async def manual_triage(exception_id: int) -> dict:
     spawn(triage_agent.triage_exception(exception_id), name=f"triage:{exception_id}")
     return {"started": True}
+
+
+@router.get("/ai/status")
+def ai_status() -> dict:
+    return ai_budget.status()
+
+
+class AutoBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/ai/auto")
+def ai_auto(body: AutoBody) -> dict:
+    """Toggle watchdog-initiated investigations (the sim never calls the LLM
+    while this is off; manual buttons always work within the budget)."""
+    return ai_budget.set_auto(body.enabled)
 
 
 @router.get("/actions")

@@ -9,7 +9,7 @@ import { AppShell } from "@/components/shell/AppShell";
 import { ActionCard } from "@/components/ops/ActionQueue";
 import { api } from "@/lib/api";
 import { mdhm, minutesAsHours, num, pct, usd } from "@/lib/format";
-import { useActions, useLive } from "@/lib/hooks";
+import { useActions, useLive, useLiveInvalidation } from "@/lib/hooks";
 import type { UnassignedLoad } from "@/lib/types";
 
 interface Candidate {
@@ -35,6 +35,7 @@ interface Board {
 }
 
 function CandidateTable({ loadId }: { loadId: string }) {
+  useLiveInvalidation("candidates");
   const { data } = useQuery({
     queryKey: ["candidates", loadId],
     queryFn: () =>
@@ -102,6 +103,7 @@ function CandidateTable({ loadId }: { loadId: string }) {
 export default function DispatchPage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [requestingLoad, setRequestingLoad] = useState<string | null>(null);
+  useLiveInvalidation("dispatch");
   const { data: board } = useQuery({
     queryKey: ["dispatch"],
     queryFn: () => api.get<Board>("/api/dispatch/board"),

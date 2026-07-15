@@ -1,7 +1,7 @@
 "use client";
 
 import maplibregl, { Map as MLMap, Marker } from "maplibre-gl";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { API_URL } from "@/lib/api";
 import { useLive } from "@/lib/hooks";
@@ -17,9 +17,41 @@ const ETA_COLOR: Record<string, string> = {
   CRITICAL: "#dc2626",
 };
 
+function applyRouteHighlight(
+  map: MLMap,
+  trips: TripRow[],
+  selectedTrip: string | null,
+) {
+  if (!map.isStyleLoaded()) return;
+  const selected = trips.find((trip) => trip.trip_id === selectedTrip);
+  const selectedGeometry = selected?.geometry_id ?? null;
+  const geometryIds = new Set(trips.map((trip) => trip.geometry_id));
+
+  for (const geometryId of geometryIds) {
+    const layer = `route-${geometryId}`;
+    if (!map.getLayer(layer)) continue;
+    const isSelected = geometryId === selectedGeometry;
+    map.setPaintProperty(layer, "line-width", isSelected ? 3.2 : 1.6);
+    map.setPaintProperty(layer, "line-opacity", isSelected ? 0.9 : 0.35);
+    map.setPaintProperty(
+      layer,
+      "line-color",
+      isSelected && selected
+        ? (ETA_COLOR[selected.eta_state] ?? "#2489e9")
+        : "#2489e9",
+    );
+  }
+
+  if (selectedGeometry !== null) {
+    const selectedLayer = `route-${selectedGeometry}`;
+    if (map.getLayer(selectedLayer)) map.moveLayer(selectedLayer);
+  }
+}
+
 function markerEl(t: TruckPos, hasAlert: boolean): HTMLDivElement {
   const el = document.createElement("div");
   el.className = "tp-marker";
+  el.dataset.tripId = t.trip_id ?? "";
   const color = t.trip_id ? (ETA_COLOR[t.eta_state ?? "NORMAL"] ?? "#2489e9") : "#64748b";
   el.innerHTML = `
     <div class="${hasAlert ? "pulse" : ""}" style="
@@ -53,6 +85,7 @@ export function FleetMap({
   const mapRef = useRef<MLMap | null>(null);
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const loadedGeoms = useRef<Set<number>>(new Set());
+  const [routeRevision, setRouteRevision] = useState(0);
   const trucks = useLive((s) => s.trucks);
 
   useEffect(() => {
@@ -66,11 +99,13 @@ export function FleetMap({
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     mapRef.current = map;
+    const markers = markersRef.current;
+    const geometries = loadedGeoms.current;
     return () => {
       map.remove();
       mapRef.current = null;
-      markersRef.current.clear();
-      loadedGeoms.current.clear();
+      markers.clear();
+      geometries.clear();
     };
   }, []);
 
@@ -83,7 +118,10 @@ export function FleetMap({
         if (loadedGeoms.current.has(trip.geometry_id)) continue;
         loadedGeoms.current.add(trip.geometry_id);
         fetch(`${API_URL}/api/geometry/${trip.geometry_id}`)
-          .then((r) => r.json())
+          .then((r) => {
+            if (!r.ok) throw new Error(`Geometry request failed: ${r.status}`);
+            return r.json();
+          })
           .then((geom: { points: [number, number][] }) => {
             if (!mapRef.current || mapRef.current.getSource(`route-${trip.geometry_id}`)) return;
             mapRef.current.addSource(`route-${trip.geometry_id}`, {
@@ -107,6 +145,7 @@ export function FleetMap({
                 "line-opacity": 0.4,
               },
             });
+            setRouteRevision((revision) => revision + 1);
           })
           .catch(() => loadedGeoms.current.delete(trip.geometry_id));
       }
@@ -118,20 +157,9 @@ export function FleetMap({
   // highlight selected trip's line
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    for (const trip of trips) {
-      const layer = `route-${trip.geometry_id}`;
-      if (!map.getLayer(layer)) continue;
-      const isSel = trip.trip_id === selectedTrip;
-      map.setPaintProperty(layer, "line-width", isSel ? 3.2 : 1.6);
-      map.setPaintProperty(layer, "line-opacity", isSel ? 0.9 : 0.35);
-      map.setPaintProperty(
-        layer,
-        "line-color",
-        isSel ? (ETA_COLOR[trip.eta_state] ?? "#2489e9") : "#2489e9",
-      );
-    }
-  }, [selectedTrip, trips]);
+    if (!map) return;
+    applyRouteHighlight(map, trips, selectedTrip);
+  }, [routeRevision, selectedTrip, trips]);
 
   // truck markers follow live positions
   useEffect(() => {
@@ -145,13 +173,14 @@ export function FleetMap({
       if (existing) {
         existing.setLngLat([t.lon, t.lat]);
         const el = existing.getElement();
+        el.dataset.tripId = t.trip_id ?? "";
         const fresh = markerEl(t, hasAlert);
         el.replaceChildren(...fresh.children);
       } else {
         const el = markerEl(t, hasAlert);
         el.addEventListener("click", (e) => {
           e.stopPropagation();
-          onSelectTrip(t.trip_id);
+          onSelectTrip(el.dataset.tripId || null);
         });
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat([t.lon, t.lat])
