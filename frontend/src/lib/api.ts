@@ -1,5 +1,9 @@
+// In local dev, .env.local sets this to http://localhost:8000. In any build
+// where the env var is absent (e.g. a plain Vercel deploy), fall back to the
+// deployed Railway backend so the hosted frontend works without extra config.
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_URL ??
+  "https://truckerpath-production.up.railway.app";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
