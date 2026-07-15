@@ -10,9 +10,14 @@ RUN cd backend && uv sync --frozen --no-dev
 COPY backend/app ./backend/app
 COPY archive ./archive
 
+# Seed the SQLite database at BUILD time so the container boots instantly and
+# passes the healthcheck immediately (no 2-3 min first-boot seed racing the
+# probe). No API key needed here - seeding is pure ETL + optional OSRM fetch.
+RUN cd backend && uv run python -m app.etl.seed
+
 WORKDIR /srv/backend
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 
-# first boot seeds SQLite from ../archive (takes ~1 min, incl. OSRM fetch)
-CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form so $PORT is expanded at runtime (Railway provides it).
+CMD uv run uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
