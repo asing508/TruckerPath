@@ -92,6 +92,9 @@ app = FastAPI(title="Fleet Copilot", version="1.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[FRONTEND_ORIGIN, "http://localhost:3000", "http://127.0.0.1:3000"],
+    # Any Vercel deployment of the frontend is allowed, so the backend never
+    # needs a redeploy just to learn the final frontend URL.
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_methods=["*"],
     allow_headers=["*"],
 )
