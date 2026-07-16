@@ -1,17 +1,25 @@
-"""Exception Triage: when the watchdog opens a HIGH/CRITICAL exception the
-agent investigates with tools and proposes one concrete action for approval."""
+"""Fast exception triage over one request-scoped evidence bundle.
+
+The watchdog detects the issue for free. On a manual click (or a gated
+CRITICAL escalation), Python gathers the small set of relevant fleet facts and
+Gemini produces one structured assessment in a single logical request.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 
+from google.genai import types
 from sqlmodel import Session
 
+from ..config import GEMINI_TRIAGE_MODEL
 from ..db import engine
 from ..models import ExceptionState, FleetException, PendingAction
 from ..streams import broadcaster
-from .gemini import run_agent
+from .budget import ai_budget
+from .gemini import finish_run, resolve_model, start_run, structured_call
 from .schemas import TriageAssessment
 from .tools_common import (
     find_nearby_drivers,
@@ -24,16 +32,18 @@ from .tools_common import (
     get_trip_state,
 )
 
+log = logging.getLogger("agents.triage")
+
 SYSTEM = """You are the operations copilot for Sunbelt Carriers (14-truck TX/OK
-fleet). The monitoring system opened an exception on a live load. Investigate
-and propose exactly one next action for the dispatcher to approve.
+fleet). The monitoring system opened an exception on a live load. The backend
+has already assembled verified, read-only fleet context. Use that context to
+propose exactly one next action for the dispatcher to approve.
 
 Method:
-1. get_exception for detector evidence, then get_trip_state.
-2. Corroborate: recent pings for movement, driver HOS if relevant, lane
-   history for whether this lane is chronically late, customer profile when
-   customer communication may be needed.
-3. Decide the single best action. Prefer the least disruptive action that
+1. Start with detector evidence and current trip/driver state.
+2. Corroborate with recent pings, lane history, customer history, nearby
+   drivers, or detention math when those sections are present.
+3. Decide the single best action. Prefer the least disruptive option that
    protects the delivery promise. RELAY_SWAP only when HOS math truly fails.
 4. If customers should be told, draft the email: subject + body, professional,
    specific times, no blame, offers a concrete new commitment.
@@ -44,7 +54,111 @@ data supports it. Do not invent weather, traffic, or breakdown causes - if the
 telemetry cannot distinguish causes, say what the possibilities are and pick
 the action robust to them."""
 
-_semaphore = asyncio.Semaphore(1)  # serialize auto-triage: free-tier quotas are tight
+_semaphore = asyncio.Semaphore(1)
+
+
+def build_triage_context(exception_id: int) -> dict:
+    """Collect a compact, request-scoped evidence bundle.
+
+    Nothing is cached or retained in memory after the run. Pings and nearby
+    alternatives are capped, and expensive sections are included only when
+    relevant to the exception type.
+    """
+    exception = get_exception.fn(exception_id)
+    context: dict = {
+        "context_version": 1,
+        "exception": exception,
+    }
+    if "error" in exception:
+        return context
+
+    trip_id = exception.get("trip_id")
+    driver_id = exception.get("driver_id")
+    trip: dict = {}
+
+    if trip_id:
+        trip = get_trip_state.fn(trip_id)
+        context["trip"] = trip
+        context["recent_pings"] = get_recent_pings.fn(trip_id, limit=6)
+
+    trip_driver = trip.get("driver") if isinstance(trip, dict) else None
+    if isinstance(trip_driver, dict) and "error" not in trip_driver:
+        context["driver"] = trip_driver
+    elif driver_id:
+        context["driver"] = get_driver.fn(driver_id)
+
+    load = trip.get("load", {}) if isinstance(trip, dict) else {}
+    if isinstance(load, dict):
+        route_id = load.get("route_id")
+        customer = load.get("customer") or {}
+        customer_id = customer.get("id") if isinstance(customer, dict) else None
+        if route_id:
+            context["lane_history"] = get_lane_history.fn(route_id)
+        if customer_id:
+            context["customer_profile"] = get_customer_profile.fn(customer_id)
+
+    exception_type = str(exception.get("type", ""))
+    if exception_type == "HOS_RISK":
+        driver = context.get("driver") or {}
+        position = driver.get("position") if isinstance(driver, dict) else None
+        if (
+            isinstance(position, dict)
+            and position.get("lat") is not None
+            and position.get("lon") is not None
+        ):
+            context["nearby_drivers"] = find_nearby_drivers.fn(
+                position["lat"], position["lon"], radius_miles=250,
+            )
+
+    if exception_type == "DETENTION" and trip_id:
+        context["detention_math"] = get_detention_math.fn(trip_id)
+
+    return context
+
+
+async def run_fast_triage(
+    exception_id: int,
+) -> tuple[TriageAssessment | None, int]:
+    """Build context once and make one structured Gemini request.
+
+    There is intentionally no timeout and no in-memory cache.
+    """
+    if not ai_budget.try_start_run("triage"):
+        return None, 0
+
+    model = GEMINI_TRIAGE_MODEL or resolve_model()
+    run_id, tracer = start_run("triage", str(exception_id), model=model)
+    try:
+        tracer.emit(
+            "tool_call",
+            name="build_triage_context",
+            payload={"exception_id": exception_id, "invoked_by": "backend_fast_path"},
+        )
+        context = await asyncio.to_thread(build_triage_context, exception_id)
+        tracer.emit("tool_result", name="build_triage_context", payload=context)
+
+        compact_context = json.dumps(context, default=str, separators=(",", ":"))
+        result = await structured_call(
+            system=SYSTEM,
+            parts=[types.Part.from_text(
+                text=(
+                    f"Exception #{exception_id} just fired. Analyze this verified "
+                    f"fleet context and finalize one action:\n{compact_context}"
+                ),
+            )],
+            output_schema=TriageAssessment,
+            model=model,
+            temperature=0.2,
+        )
+        assessment = TriageAssessment.model_validate(result)
+        tracer.emit("output", payload=assessment.model_dump())
+        finish_run(run_id, summary=assessment.action_summary)
+        return assessment, run_id
+    except Exception as exc:
+        log.exception("fast triage run %s failed", run_id)
+        tracer.emit("error", payload={"error": str(exc)[:800]})
+        finish_run(run_id, summary="", error=str(exc))
+        return None, run_id
 
 
 async def triage_exception(exception_id: int) -> dict:
@@ -58,16 +172,7 @@ async def triage_exception(exception_id: int) -> dict:
             s.commit()
         broadcaster.publish("exception", {"id": exception_id, "state": "TRIAGING"})
 
-        result, run_id = await run_agent(
-            kind="triage",
-            subject_id=str(exception_id),
-            system=SYSTEM,
-            prompt=f"Exception #{exception_id} just fired. Investigate and finalize.",
-            tools=[get_exception, get_trip_state, get_recent_pings, get_driver,
-                   find_nearby_drivers, get_lane_history, get_customer_profile,
-                   get_detention_math],
-            output_schema=TriageAssessment,
-        )
+        result, run_id = await run_fast_triage(exception_id)
 
         with Session(engine) as s:
             exc = s.get(FleetException, exception_id)

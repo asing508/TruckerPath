@@ -217,6 +217,9 @@ generation:
 - **Auto-AI is off by default.** Monitoring and deterministic detection still
   run continuously.
 - **Manual by default.** Every AI workflow begins with an explicit button.
+- **Single-request triage.** The backend assembles a capped, request-scoped
+  exception context, then asks the lightweight triage model for one structured
+  assessment instead of spending a model turn on every evidence lookup.
 - **Strict auto gate.** If auto-AI is enabled, only a CRITICAL incident can
   trigger triage, no more than once per hour.
 - **Request-level budget.** Every actual Gemini HTTP request is counted in a

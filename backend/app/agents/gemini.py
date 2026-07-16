@@ -1,10 +1,9 @@
-"""Gemini client, model cascade, and the streaming tool-loop harness.
+"""Gemini model cascade, tool-loop harness, and structured-call helper.
 
-Every agent in the app runs through `run_agent`: a manual function-calling
-loop that persists each step (AgentStep rows) and publishes it over SSE so the
-UI's Agent Trace console shows the model's actual tool calls in real time.
-The investigation phase uses tools; the final phase re-asks for a structured
-object (response_schema) so downstream code never parses prose.
+General reasoning agents use `run_agent`, which persists tool steps and
+publishes them over SSE. Latency-sensitive triage and document extraction use
+`structured_call` with context assembled by trusted code. Both paths retain
+structured output contracts and traceable evidence.
 """
 from __future__ import annotations
 
@@ -96,11 +95,16 @@ class Tracer:
         })
 
 
-def start_run(kind: str, subject_id: str) -> tuple[int, Tracer]:
+def start_run(
+    kind: str,
+    subject_id: str,
+    *,
+    model: str | None = None,
+) -> tuple[int, Tracer]:
     started_at = datetime.now()
-    model = resolve_model()
+    selected_model = model or resolve_model()
     with Session(db_engine) as s:
-        run = AgentRun(kind=kind, subject_id=subject_id, model=model,
+        run = AgentRun(kind=kind, subject_id=subject_id, model=selected_model,
                        started_at=started_at)
         s.add(run)
         s.commit()
@@ -111,7 +115,7 @@ def start_run(kind: str, subject_id: str) -> tuple[int, Tracer]:
         "kind": kind,
         "subject_id": subject_id,
         "status": "RUNNING",
-        "model": model,
+        "model": selected_model,
         "summary": "",
         "error": "",
         "started_at": started_at,

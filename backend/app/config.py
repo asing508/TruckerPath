@@ -19,6 +19,9 @@ load_dotenv(BACKEND_DIR / ".env")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")
 GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "")
+# Triage is latency-sensitive and uses one structured request. Keep it on the
+# lightweight model unless a deployment explicitly overrides it.
+GEMINI_TRIAGE_MODEL = os.getenv("GEMINI_TRIAGE_MODEL", "gemini-3.1-flash-lite")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
 # ---- AI event gate ----------------------------------------------------------

@@ -133,7 +133,7 @@ tx(s, "The dispatcher's exception-to-action workspace.", 0.8, 2.5, 10.7, 0.5, {
   fontFace: FONT_H, bold: true, fontSize: 23, color: C.blue,
 });
 tx(s,
-  "It watches every load, investigates what changed, proposes the next best action, and waits for the dispatcher to approve it.",
+  "Deterministic monitoring watches every load. Gemini investigates only at a gated decision point, proposes the next action, and waits for approval.",
   0.8, 3.18, 9.9, 0.78, { fontSize: 16, color: "CAD5E1", lineSpacingMultiple: 1.1 });
 pill(s, "5–50 TRUCK FLEETS", 0.8, 4.32, 2.05, C.navy2, "BFD0E0", "405064");
 pill(s, "WORKING PROTOTYPE", 3.0, 4.32, 2.12, C.navy2, "BFD0E0", "405064");
@@ -216,8 +216,8 @@ heading(s, "How it works", "Live events become approved work—not another wall 
   "A single event-driven loop connects the simulator, watchdogs, agents, action queue, and execution state.");
 const flow = [
   ["INGEST", "GPS, HOS, load, customer, documents"],
-  ["DETECT", "Rules identify a meaningful exception"],
-  ["INVESTIGATE", "Agent calls read-only fleet tools"],
+  ["DETECT", "Rules identify and queue a meaningful exception"],
+  ["INVESTIGATE", "Human click or gated CRITICAL event starts read-only tools"],
   ["PROPOSE", "Evidence, impact, and editable draft"],
   ["APPROVE", "Dispatcher edits, approves, or dismisses"],
   ["EXECUTE", "Action is logged and product state updates"],
@@ -259,8 +259,8 @@ tx(s, "Dispatcher approves invoice", 8.8, 5.08, 2.45, 0.38, {
 });
 tx(s, "Every stage emits the next state change; the dispatcher never has to manually re-enter the same fact.",
   0.98, 5.7, 10.95, 0.3, { fontSize: 10.6, color: "9FB0C2" });
-pill(s, "EVENT-DRIVEN BY DESIGN", 9.72, 6.43, 2.88, C.blue2, C.blue, C.blue2,
-  { fontSize: 8.8 });
+pill(s, "EVENT-GATED AI  ·  AUTO OFF BY DEFAULT", 8.87, 6.43, 3.73,
+  C.blue2, C.blue, C.blue2, { fontSize: 8.3 });
 
 // 4 — Five modules
 s = newSlide(C.bg, "What I built");
@@ -378,10 +378,10 @@ const boundaries = [
     x: 0.7, label: "01  DETERMINISTIC CODE", color: C.blue, fill: C.blue2,
     title: "Compute and enforce",
     bullets: [
-      "HOS ledger and legal schedules",
-      "Candidate scores and event detectors",
-      "Detention, invoice, and impact math",
-      "Read-only SQL authorizer and schema checks",
+      "HOS, scores, detectors, and money math",
+      "Read-only SQL and schema enforcement",
+      "AI gate: auto-off, critical-only, hourly cap",
+      "Request budget, reserve, and circuit breaker",
     ],
   },
   {
@@ -556,7 +556,7 @@ tx(s, "ACTION LAYER", 0.98, 4.98, 1.45, 0.2, {
   fontFace: FONT_H, bold: true, fontSize: 9.2, color: C.green, charSpacing: 1.2,
 });
 const actionNodes = [
-  ["READ-ONLY TOOLS", "fleet facts + Vision"],
+  ["AI GATE + TOOLS", "manual / critical + read-only"],
   ["GEMINI AGENT", "investigate + draft"],
   ["PENDING ACTION", "evidence + impact"],
   ["HUMAN + EXECUTOR", "approve + update state"],
@@ -584,10 +584,10 @@ s = newSlide(C.bg, "Interview demo");
 heading(s, "Demo flow", "A 7-minute walkthrough tells one connected story.",
   "The goal is not to visit six pages—it is to show detect → decide → act → learn → collect.");
 const demoSteps = [
-  ["01", "Operations  ·  1:15", "Select a trip and verify its route highlights. Let a watchdog surface an exception; open Agent Trace."],
+  ["01", "Operations  ·  1:15", "Select a trip and route. Show auto-AI off plus the request counter; surface an exception and open Agent Trace."],
   ["02", "Action Queue  ·  0:45", "Inspect evidence and impact, edit the drafted SMS, approve it, then confirm it on Driver phone."],
   ["03", "Dispatch  ·  1:15", "Choose an unassigned load, compare drivers, ask the agent, approve, and see the new trip enter live operations."],
-  ["04", "Cost  ·  1:00", "Ask “Which customers cause the most detention?” and inspect the guarded SQL plus chart-ready answer."],
+  ["04", "Cost  ·  1:00", "Ask “Which customers cause the most detention over 2 hours?” and inspect the guarded SQL and answer."],
   ["05", "Safety  ·  0:45", "Select an at-risk driver and generate a coaching brief grounded in computed HOS and risk facts."],
   ["06", "Billing  ·  1:30", "Audit a packet, surface $142.50 in unclaimed detention, and approve the corrected invoice."],
 ];
@@ -638,8 +638,8 @@ const tradeoffs = [
     "Add tenancy, RBAC, Postgres, durable jobs, and backups."],
   ["External sends are simulated", "Avoids contacting real drivers or customers during a demo.",
     "Integrate SMS/email providers with idempotency, audit, and undo."],
-  ["Free-tier Gemini quotas", "Enough to prove real calls, tracing, and fallback behavior.",
-    "Use production quota/SLA, retries, evals, and model routing."],
+  ["Event-gated Gemini", "Monitoring stays deterministic; AI runs only at valuable decision points.",
+    "Add production quota/SLA, evals, cost telemetry, and model routing."],
 ];
 tradeoffs.forEach((row, i) => {
   const y = 2.56 + i * 0.74;
