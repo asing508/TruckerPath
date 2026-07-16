@@ -248,32 +248,52 @@ def _comms(
 ) -> str:
     impact = json.loads(action.impact)
     exc_id = impact.get("exception_id")
+    exc = s.get(FleetException, exc_id) if exc_id else None
+
+    # New actions carry explicit IDs. The fallbacks keep proposals created by
+    # older app versions executable after a hot reload.
+    trip_id = impact.get("trip_id") or (exc.trip_id if exc else None)
+    trip = s.get(LiveTrip, trip_id) if trip_id else s.get(LiveTrip, action.subject_id)
+    if trip and not trip_id:
+        trip_id = trip.trip_id
+
+    driver_id = impact.get("driver_id") or (exc.driver_id if exc else None)
+    if not driver_id and trip:
+        driver_id = trip.driver_id
+    if not driver_id and exc and exc.truck_id:
+        truck = s.get(FleetTruck, exc.truck_id)
+        driver_id = truck.driver_id if truck else None
+    driver = s.get(FleetDriver, driver_id) if driver_id else None
+
+    load_id = impact.get("load_id") or (exc.load_id if exc else None)
+    if not load_id and trip:
+        load_id = trip.load_id
+    load = s.get(LiveLoad, load_id) if load_id else None
+
     notes = []
     if draft.get("sms_body"):
-        trip = s.get(LiveTrip, action.subject_id)
-        driver = s.get(FleetDriver, trip.driver_id) if trip else None
-        if driver:
-            s.add(MessageLog(channel="SMS", to_name=driver.name, to_addr=driver.phone,
-                             body=draft["sms_body"], related_trip_id=action.subject_id,
-                             sent_at=now))
-            events.append(("message", {
-                "channel": "SMS",
-                "to_name": driver.name,
-                "body": draft["sms_body"],
-                "ts": now,
-            }))
-            notes.append(f"SMS to {driver.name}")
-        else:
-            notes.append("trip/driver no longer active - SMS not sent")
+        if not driver:
+            raise ValueError("driver recipient is unavailable; refresh or dismiss this proposal")
+        s.add(MessageLog(channel="SMS", to_name=driver.name, to_addr=driver.phone,
+                         body=draft["sms_body"], related_trip_id=trip_id,
+                         sent_at=now))
+        events.append(("message", {
+            "channel": "SMS",
+            "to_name": driver.name,
+            "body": draft["sms_body"],
+            "ts": now,
+        }))
+        notes.append(f"SMS to {driver.name}")
     if draft.get("email_body"):
-        trip = s.get(LiveTrip, action.subject_id)
-        load = s.get(LiveLoad, trip.load_id) if trip else None
-        to_name = load.customer_name if load else "Customer"
+        if not load:
+            raise ValueError("customer recipient is unavailable; refresh or dismiss this proposal")
+        to_name = load.customer_name
         s.add(MessageLog(channel="EMAIL", to_name=to_name,
                          to_addr=f"ap@{to_name.lower().replace(' ', '')}.example",
                          subject=draft.get("email_subject", ""),
                          body=draft["email_body"],
-                         related_trip_id=action.subject_id, sent_at=now))
+                         related_trip_id=trip_id,
+                         related_load_id=load.load_id, sent_at=now))
         events.append(("message", {
             "channel": "EMAIL",
             "to_name": to_name,
@@ -281,13 +301,11 @@ def _comms(
             "ts": now,
         }))
         notes.append(f"email to {to_name}")
-    if exc_id:
-        exc = s.get(FleetException, exc_id)
-        if exc:
-            exc.state = ExceptionState.ACTIONED
-            exc.updated_at = now
-            s.add(exc)
-            events.append(("exception", {"id": exc_id, "state": "ACTIONED"}))
+    if exc:
+        exc.state = ExceptionState.ACTIONED
+        exc.updated_at = now
+        s.add(exc)
+        events.append(("exception", {"id": exc_id, "state": "ACTIONED"}))
     return "; ".join(notes) if notes else "monitoring - no comms sent"
 
 

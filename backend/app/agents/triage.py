@@ -16,7 +16,15 @@ from sqlmodel import Session
 
 from ..config import GEMINI_TRIAGE_MODEL
 from ..db import engine
-from ..models import ExceptionState, FleetException, PendingAction
+from ..models import (
+    ExceptionState,
+    FleetDriver,
+    FleetException,
+    FleetTruck,
+    LiveLoad,
+    LiveTrip,
+    PendingAction,
+)
 from ..streams import broadcaster
 from .budget import ai_budget
 from .gemini import finish_run, resolve_model, start_run, structured_call
@@ -52,9 +60,32 @@ Method:
 Rules: cite only tool evidence. State impact in dollars or minutes when the
 data supports it. Do not invent weather, traffic, or breakdown causes - if the
 telemetry cannot distinguish causes, say what the possibilities are and pick
-the action robust to them."""
+the action robust to them. Only draft a driver SMS or customer email when the
+verified context contains that recipient."""
 
 _semaphore = asyncio.Semaphore(1)
+
+
+def _action_targets(s: Session, exc: FleetException) -> dict:
+    """Resolve durable action recipients from explicit fleet relationships."""
+    trip = s.get(LiveTrip, exc.trip_id) if exc.trip_id else None
+    truck_id = exc.truck_id or (trip.truck_id if trip else None)
+    truck = s.get(FleetTruck, truck_id) if truck_id else None
+    driver_id = exc.driver_id or (trip.driver_id if trip else None)
+    if not driver_id and truck:
+        driver_id = truck.driver_id
+    driver = s.get(FleetDriver, driver_id) if driver_id else None
+
+    load_id = exc.load_id or (trip.load_id if trip else None)
+    load = s.get(LiveLoad, load_id) if load_id else None
+    return {
+        "trip_id": trip.trip_id if trip else None,
+        "driver_id": driver.driver_id if driver else None,
+        "driver_name": driver.name if driver else None,
+        "truck_id": truck.truck_id if truck else truck_id,
+        "load_id": load.load_id if load else None,
+        "customer_name": load.customer_name if load else None,
+    }
 
 
 def build_triage_context(exception_id: int) -> dict:
@@ -98,6 +129,17 @@ def build_triage_context(exception_id: int) -> dict:
             context["customer_profile"] = get_customer_profile.fn(customer_id)
 
     exception_type = str(exception.get("type", ""))
+    if exception.get("truck_id") and "driver" not in context:
+        with Session(engine) as s:
+            exc = s.get(FleetException, exception_id)
+            targets = _action_targets(s, exc) if exc else {}
+        context["recipients"] = {
+            "driver_id": targets.get("driver_id"),
+            "driver_name": targets.get("driver_name"),
+            "customer_name": targets.get("customer_name"),
+        }
+        if targets.get("driver_id"):
+            context["driver"] = get_driver.fn(targets["driver_id"])
     if exception_type == "HOS_RISK":
         driver = context.get("driver") or {}
         position = driver.get("position") if isinstance(driver, dict) else None
@@ -191,24 +233,38 @@ async def triage_exception(exception_id: int) -> dict:
             exc.agent_run_id = run_id
             s.add(exc)
 
+            targets = _action_targets(s, exc)
             draft: dict = {"action": assessment.recommended_action,
                            "summary": assessment.action_summary}
-            kind = "SMS_DRIVER" if assessment.driver_sms else "EMAIL_CUSTOMER"
-            if assessment.recommended_action == "MONITOR":
-                kind = "MONITOR"
-            if assessment.customer_email:
+            if assessment.customer_email and targets["load_id"]:
                 draft["email_subject"] = assessment.customer_email.subject
                 draft["email_body"] = assessment.customer_email.body
-            if assessment.driver_sms:
+            if assessment.driver_sms and targets["driver_id"]:
                 draft["sms_body"] = assessment.driver_sms
+                draft["driver_name"] = targets["driver_name"]
+
+            if assessment.recommended_action == "MONITOR":
+                kind = "MONITOR"
+            elif draft.get("sms_body"):
+                kind = "SMS_DRIVER"
+            elif draft.get("email_body"):
+                kind = "EMAIL_CUSTOMER"
+            else:
+                # Do not offer a communication action that cannot be delivered.
+                kind = "MONITOR"
 
             action = PendingAction(
                 run_id=run_id,
                 kind=kind,
                 title=f"[{assessment.severity}] {assessment.action_summary[:110]}",
-                subject_id=exc.trip_id or str(exception_id),
+                subject_id=(targets["trip_id"] or targets["load_id"]
+                            or targets["truck_id"] or str(exception_id)),
                 impact=json.dumps({"estimate": assessment.impact_estimate,
-                                   "exception_id": exception_id}),
+                                   "exception_id": exception_id,
+                                   "trip_id": targets["trip_id"],
+                                   "driver_id": targets["driver_id"],
+                                   "truck_id": targets["truck_id"],
+                                   "load_id": targets["load_id"]}),
                 draft=json.dumps(draft),
                 rationale=f"{assessment.root_cause_hypothesis}",
                 created_at=datetime.now(),
